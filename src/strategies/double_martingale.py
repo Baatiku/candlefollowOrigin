@@ -122,8 +122,11 @@ STANDARD_BUDGET_TIERS = [
 # and T1 max-loss ≈ 35–40 % of the bracket floor, with wide spacing between brackets.
 # Sorted descending — first match wins.
 # Format: (min_balance, T0_ladder, T1_ladder)
+# Single flat 9-step Martingale sequence (no tiers).
+# Each step's win at 85% payout covers all previous losses plus a small profit.
+# Sequence: 1, 2, 4, 10, 21, 46, 100, 218, 474
 BALANCE_TIER_TABLE = [
-    (0, [1, 2, 4, 8], [2, 4, 8, 16]),
+    (0, [1, 2, 4, 10, 21, 46, 100, 218, 474], [1, 2, 4, 10, 21, 46, 100, 218, 474]),
 ]
 
 EVALUATION_WINDOW_MINUTES = 15
@@ -132,11 +135,10 @@ TIER_SECOND_EXHAUSTION_COOLDOWN_MINUTES = 5
 TIER_FAILURES_BEFORE_ESCALATE = 1
 TIER_1_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
 TIER_HIGHER_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
-LADDER_MAX_STEP_INDEX = 3       # 0-based; 4 steps per tier
-RECOVERY_TIER_CEILING = 1      # T1 is the last active tier; exhaustion = total loss reset
-# Odd tier indices are reserve tiers within their round (T1=R1).
-# Even indices (0) are the main tiers that start each round.
-ROUND_RESERVE_TIERS = {1}   # set for fast membership tests
+LADDER_MAX_STEP_INDEX = 8       # 0-based; 9 steps, no tiers
+RECOVERY_TIER_CEILING = 0      # No tier escalation — single flat sequence only
+# No reserve tiers; the bot never escalates beyond T0.
+ROUND_RESERVE_TIERS = set()   # empty — no reserve tiers
 
 # Sentinel value used internally to distinguish a genuine $0 profit from a timeout
 _TIMEOUT_SENTINEL = float("-inf")
