@@ -1,6 +1,7 @@
-import config as app_config
 """Analyze winning vs losing rounds against historical candle patterns."""
 from __future__ import annotations
+
+import config as app_config
 
 import logging
 import statistics
