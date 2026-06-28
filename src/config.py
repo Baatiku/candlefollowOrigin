@@ -12,7 +12,7 @@ TRADING_MODE = os.getenv("TRADING_MODE", "binary") # Switched to binary for 5m e
 FOLLOW_CANDLE_TIMEFRAME = 300  # 5 minutes
 RANGING_LOOKBACK_CANDLES = 6   # How many candles to look back for ranging filter
 RANGING_MAX_ALTERNATIONS = 3   # Max color changes allowed in the lookback window
-RANGING_MIN_ADX = float(os.getenv("RANGING_MIN_ADX", "25.0"))
+RANGING_MIN_ADX = float(os.getenv("RANGING_MIN_ADX", "20.0"))
 
 
 if not IQ_EMAIL or not IQ_PASSWORD:
@@ -254,7 +254,7 @@ TIER_CEILING_THRESHOLDS = [
 # UTC-based hard ban windows: no trading for any asset (midnight-crossing supported)
 # 21:45-02:05 UTC = 10:45 PM–3:05 AM Lagos: midnight dead zone (low liquidity, erratic spreads).
 # 06:00-06:59 UTC = 7:00–7:59 AM Lagos: historically weak (36% WR); hard-banned from 7am Lagos sharp.
-_default_utc_bans = os.getenv("UTC_BAN_WINDOWS", "21:45-02:05,06:00-06:59")
+_default_utc_bans = os.getenv("UTC_BAN_WINDOWS", "")
 UTC_BAN_WINDOWS = [w.strip() for w in _default_utc_bans.split(",") if w.strip()]
 
 # ── Multi-asset simultaneous trading ──────────────────────────────────────────
