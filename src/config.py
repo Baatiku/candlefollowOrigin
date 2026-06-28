@@ -12,6 +12,7 @@ TRADING_MODE = os.getenv("TRADING_MODE", "binary") # Switched to binary for 5m e
 FOLLOW_CANDLE_TIMEFRAME = 300  # 5 minutes
 RANGING_LOOKBACK_CANDLES = 6   # How many candles to look back for ranging filter
 RANGING_MAX_ALTERNATIONS = 3   # Max color changes allowed in the lookback window
+RANGING_MIN_ADX = float(os.getenv("RANGING_MIN_ADX", "25.0"))
 
 
 if not IQ_EMAIL or not IQ_PASSWORD:
@@ -27,9 +28,9 @@ ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or [
 
 # Entry window for 5-minute options
 ENTRY_WINDOW_START = int(os.getenv("ENTRY_WINDOW_START", "0"))  # Seconds into the candle to start looking
-ENTRY_WINDOW_END = int(os.getenv("ENTRY_WINDOW_END", "15"))     # Seconds into the candle to stop looking
-PURCHASE_DEADLINE_SEC = int(os.getenv("PURCHASE_DEADLINE_SEC", "15"))
-ENTRY_HARD_ABORT_SEC = int(os.getenv("ENTRY_HARD_ABORT_SEC", "20"))
+ENTRY_WINDOW_END = int(os.getenv("ENTRY_WINDOW_END", "60"))     # Seconds into the candle to stop looking
+PURCHASE_DEADLINE_SEC = int(os.getenv("PURCHASE_DEADLINE_SEC", "60"))
+ENTRY_HARD_ABORT_SEC = int(os.getenv("ENTRY_HARD_ABORT_SEC", "65"))
 MIN_SECONDS_TO_EXPIRY = int(os.getenv("MIN_SECONDS_TO_EXPIRY", "240")) # 4 minutes minimum
 MAX_SECONDS_TO_EXPIRY = int(os.getenv("MAX_SECONDS_TO_EXPIRY", "300")) # 5 minutes maximum
 MOMENTUM_MIN_RATIO = float(os.getenv("MOMENTUM_MIN_RATIO", "0.65"))

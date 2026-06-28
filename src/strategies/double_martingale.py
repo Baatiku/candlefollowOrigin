@@ -2098,8 +2098,9 @@ class DoubleMartingaleBot:
                 
             # Ranging filter: ADX
             adx_value = self._calculate_adx(closed_candles, adx_period)
-            if adx_value < 25.0:
-                result["reason"] = f"Ranging market (ADX {adx_value:.1f} < 25)"
+            min_adx = float(getattr(app_config, "RANGING_MIN_ADX", 25.0))
+            if adx_value < min_adx:
+                result["reason"] = f"Ranging market (ADX {adx_value:.1f} < {min_adx})"
                 return result
                 
             recent_candles = closed_candles[-lookback:]
@@ -2123,6 +2124,18 @@ class DoubleMartingaleBot:
             result["direction"] = "call" if last_color else "put"
             result["tradeable"] = True
             result["reason"] = "Passed"
+            
+            # Merge additional metrics so the gate check doesn't use 0.0 defaults
+            base = self._score_asset_movement(asset_name)
+            if base:
+                result.update(base)
+            else:
+                result.update({
+                    "straddle_score": 0.0,
+                    "efficiency_ratio": 0.0,
+                    "slope": 0.0,
+                    "abs_slope": 0.0
+                })
             
             logger.info(f"Candle Follow {asset_name}: ADX {adx_value:.1f}, Alts: {alternations}/{lookback}. Signal: {result['direction'].upper()}")
             return result
