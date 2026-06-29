@@ -114,11 +114,10 @@ STANDARD_BUDGET_TIERS = [
 ]
 
 # Balance-proportional tier table.
-# Single flat 9-step Martingale sequence (no tiers).
-# Each step's win at 85% payout covers all previous losses plus a small profit.
-# Sequence: 1, 2, 4, 8, 16, 32, 64, 128, 256
+# Two-tier recovery system: T1=[1,2,4,8], T2=[4,8,16,35].
+# T1 exhaustion → escalate to T2. T2 recovers $15 debt then resets to T1.
 BALANCE_TIER_TABLE = [
-    (0, [1, 2, 4, 8, 16, 32, 64, 128, 256], [1, 2, 4, 8, 16, 32, 64, 128, 256]),
+    (0, [1, 2, 4, 8], [4, 8, 16, 35]),
 ]
 
 EVALUATION_WINDOW_MINUTES = 15
@@ -127,10 +126,10 @@ TIER_SECOND_EXHAUSTION_COOLDOWN_MINUTES = 5
 TIER_FAILURES_BEFORE_ESCALATE = 1
 TIER_1_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
 TIER_HIGHER_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
-LADDER_MAX_STEP_INDEX = 8       # 0-based; 9 steps, no tiers
-RECOVERY_TIER_CEILING = 0      # No tier escalation — single flat sequence only
-# No reserve tiers; the bot never escalates beyond T0.
-ROUND_RESERVE_TIERS = set()   # empty — no reserve tiers
+LADDER_MAX_STEP_INDEX = 3       # 0-based; 4 steps per tier
+RECOVERY_TIER_CEILING = 1      # Allow escalation from T0 to T1
+# T1 is the recovery tier
+ROUND_RESERVE_TIERS = {1}   # T1 is the reserve/recovery tier
 
 # Sentinel value used internally to distinguish a genuine $0 profit from a timeout
 _TIMEOUT_SENTINEL = float("-inf")
@@ -498,9 +497,9 @@ class DoubleMartingaleBot:
 
     def _update_budget_tiers_for_balance(self, balance=None):
         """
-        Build tier list. Currently uses a single 9-step sequence.
-        Skipped while on any tier above T0 (mid-round) or in CRM (legacy) to avoid
-        changing amounts during an active sequence.
+        Build tier list. Uses the two-tier recovery system:
+        T1=[1,2,4,8] and T2=[4,8,16,35].
+        Skipped while on any tier above T0 (mid-recovery) or in CRM (legacy).
         """
         if getattr(self, 'current_tier_index', 0) > 0 or getattr(self, 'crm_mode', False):
             return
@@ -508,13 +507,13 @@ class DoubleMartingaleBot:
             balance = self.safe_get_balance()
         for min_bal, t0, t1 in BALANCE_TIER_TABLE:
             if balance >= min_bal:
-                new_tiers = [list(t0)]
+                new_tiers = [list(t0), list(t1)]
                 if new_tiers != getattr(self, 'budget_tiers', None):
                     self.budget_tiers = new_tiers
                     logger.info(
                         f"📊 Tier bracket updated for balance ${balance:.2f} "
                         f"(≥${min_bal:,}): "
-                        f"T0={t0}"
+                        f"T0={t0}, T1={t1}"
                     )
                 return
 
@@ -6883,14 +6882,14 @@ class DoubleMartingaleBot:
             "assigned_tier_index": getattr(self, "assigned_tier_index", self.current_tier_index),
             "assigned_tier": getattr(self, "assigned_tier_index", self.current_tier_index) + 1,
             "is_mopup_phase": (
-                self.current_tier_index in (2, 4)
+                self.current_tier_index in ROUND_RESERVE_TIERS
                 and self.cumulative_debt > 0
                 and not getattr(self, "crm_mode", False)
             ),
             "mopup_initial_debt": float(getattr(self, "mopup_initial_debt", 0.0)),
             "mopup_tier": (
                 self.current_tier_index + 1
-                if self.current_tier_index in (2, 4) and self.cumulative_debt > 0
+                if self.current_tier_index in ROUND_RESERVE_TIERS and self.cumulative_debt > 0
                 else None
             ),
             "tier_failure_streak": getattr(self, "tier_failure_streak", 0),
