@@ -9,7 +9,7 @@ IQ_ACCOUNT_TYPE = os.getenv("IQ_ACCOUNT_TYPE", "PRACTICE")
 TRADING_MODE = os.getenv("TRADING_MODE", "binary") # Switched to binary for 5m expiries
 
 # --- Follow Candle 5M Strategy Config ---
-FOLLOW_CANDLE_TIMEFRAME = 300  # 5 minutes
+FOLLOW_CANDLE_TIMEFRAME = 60   # 1 minute
 RANGING_LOOKBACK_CANDLES = 6   # How many candles to look back for ranging filter
 RANGING_MAX_ALTERNATIONS = 3   # Max color changes allowed in the lookback window
 RANGING_MIN_ADX = float(os.getenv("RANGING_MIN_ADX", "20.0"))

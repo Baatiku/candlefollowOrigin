@@ -880,6 +880,7 @@ class ConfigUpdate(BaseModel):
     sim_win_rate: Optional[float] = None
     strategy_mode: Optional[str] = None
     budget_tiers: Optional[List[List[float]]] = None
+    auto_bracket_enabled: Optional[bool] = None
     ai_shadow_mode: Optional[bool] = None
     blocked_hours: Optional[List[int]] = None
     hour_boundary_block_minutes: Optional[int] = None

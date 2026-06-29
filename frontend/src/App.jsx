@@ -59,6 +59,7 @@ function App() {
   const [backtestLoading, setBacktestLoading] = useState(false);
   const [learnLoading, setLearnLoading] = useState(false);
   const [editTiers, setEditTiers] = useState(null);
+  const [editAutoBracket, setEditAutoBracket] = useState(true);
   const [tierSaveMsg, setTierSaveMsg] = useState('');
   const [aiComparison, setAiComparison] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
@@ -660,8 +661,9 @@ function App() {
   };
 
   const initTierEditor = () => {
-    const current = config?.budget_tiers || status?.budget_tiers || [[1, 2, 4, 8], [4, 8, 16, 35]];
+    const current = config?.budget_tiers || status?.budget_tiers || [[1, 3, 9, 20, 45, 100, 230]];
     setEditTiers(current.map(t => [...t]));
+    setEditAutoBracket(config?.auto_bracket_enabled ?? true);
     setTierSaveMsg('');
   };
 
@@ -669,10 +671,14 @@ function App() {
     if (!editTiers) return;
     setTierSaveMsg('');
     try {
+      const payload = {
+        budget_tiers: editTiers,
+        auto_bracket_enabled: editAutoBracket
+      };
       const res = await apiFetch('/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ budget_tiers: editTiers }),
+        body: JSON.stringify(payload),
       }, ACTION_TIMEOUT_MS);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -686,7 +692,7 @@ function App() {
         return;
       }
       setTierSaveMsg('Tiers saved!');
-      setConfig({ ...config, budget_tiers: editTiers });
+      setConfig({ ...config, budget_tiers: editTiers, auto_bracket_enabled: editAutoBracket });
       setTimeout(() => setTierSaveMsg(''), 3000);
     } catch (err) {
       setTierSaveMsg('Could not reach server');
@@ -805,7 +811,7 @@ function App() {
       <div style={overlayStyle}>
         <div style={cardStyle}>
           <h1 style={{ fontSize: '1.75rem', fontWeight: 800, marginBottom: '0.75rem' }}>
-            Welcome to YOKE Bot 👋
+            Welcome to BESTAbot 👋
           </h1>
           <p style={{ color: '#94a3b8', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
             {setupStatus?.is_railway
@@ -893,7 +899,7 @@ function App() {
       <header className="header">
         <div className="header-title">
           <Activity size={20} color="var(--primary)" />
-          YOKE Bot
+          BESTAbot
         </div>
         <div className="header-controls">
           <span style={{ fontSize: '0.78rem', color: status.connected ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
@@ -1386,6 +1392,50 @@ function App() {
             {editTiers ? (
               /* ── Edit Mode ── */
               <div style={{ overflowX: 'auto' }}>
+                <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'rgba(0,0,0,0.2)', borderRadius: '6px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                    <input 
+                      type="checkbox" 
+                      checked={editAutoBracket} 
+                      onChange={(e) => setEditAutoBracket(e.target.checked)} 
+                      id="auto-bracket-toggle"
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <label htmlFor="auto-bracket-toggle" style={{ fontSize: '0.85rem', color: 'var(--text-primary)', cursor: 'pointer', fontWeight: 600 }}>
+                      Auto-Select Bracket via Balance
+                    </label>
+                  </div>
+                  
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Manual Bracket:</label>
+                    <select 
+                      disabled={editAutoBracket}
+                      style={{
+                        padding: '0.4rem',
+                        borderRadius: '4px',
+                        border: '1px solid var(--panel-border)',
+                        background: editAutoBracket ? 'rgba(17,21,28,0.5)' : 'rgba(17,21,28,0.9)',
+                        color: editAutoBracket ? 'var(--text-muted)' : 'var(--text-primary)',
+                        fontSize: '0.85rem',
+                        cursor: editAutoBracket ? 'not-allowed' : 'pointer'
+                      }}
+                      onChange={(e) => {
+                        try {
+                          const parsed = JSON.parse(e.target.value);
+                          setEditTiers([parsed]);
+                        } catch (err) {}
+                      }}
+                    >
+                      <option value="">-- Choose Bracket --</option>
+                      <option value="[1, 3, 9, 20, 45, 100, 230]">$1 - $200 (Base $1)</option>
+                      <option value="[3, 9, 20, 45, 100, 230, 500]">$300 - $500 (Base $3)</option>
+                      <option value="[9, 20, 45, 100, 230, 500, 1100]">$500 - $2,000 (Base $9)</option>
+                      <option value="[20, 45, 100, 230, 500, 1100, 2400]">$2,000 - $5,000 (Base $20)</option>
+                      <option value="[45, 100, 230, 500, 1100, 2400, 5300]">$5,000 - $15,000 (Base $45)</option>
+                      <option value="[100, 230, 500, 1100, 2400, 5300, 11500]">$15,000+ (Base $100)</option>
+                    </select>
+                  </div>
+                </div>
                 {editTiers.map((tier, tIdx) => (
                   <div key={tIdx} style={{ marginBottom: tIdx < editTiers.length - 1 ? '0.75rem' : 0 }}>
                     <div style={{ fontSize: '0.72rem', color: 'var(--accent-blue)', fontWeight: 600, marginBottom: '0.4rem' }}>Tier {tIdx}</div>

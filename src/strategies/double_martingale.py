@@ -109,15 +109,17 @@ DIGITAL_UNSUPPORTED_ASSETS = {
 # Formula: target=L_cum+P; step1=target/(3×0.85); step2=(target+step1)/(2×0.85); step3=(target+step1+step2)/0.85
 # Tier is determined solely by current balance. On exhaustion: clear debt, reset to step 1.
 STANDARD_BUDGET_TIERS = [
-    [1, 2, 4, 9, 20, 45, 100, 230, 500],
+    [1, 3, 9, 20, 45, 100, 230],
 ]
 
 # Balance-proportional tier table.
-# Single flat 9-step Martingale sequence (no tiers).
-# Each step's win at 85% payout covers all previous losses plus a small profit.
-# Sequence: 1, 2, 4, 9, 20, 45, 100, 230, 500
 BALANCE_TIER_TABLE = [
-    (0, [1, 2, 4, 9, 20, 45, 100, 230, 500], [1, 2, 4, 9, 20, 45, 100, 230, 500]),
+    (0, [1, 3, 9, 20, 45, 100, 230], [1, 3, 9, 20, 45, 100, 230]),
+    (300, [3, 9, 20, 45, 100, 230, 500], [3, 9, 20, 45, 100, 230, 500]),
+    (500, [9, 20, 45, 100, 230, 500, 1100], [9, 20, 45, 100, 230, 500, 1100]),
+    (2000, [20, 45, 100, 230, 500, 1100, 2400], [20, 45, 100, 230, 500, 1100, 2400]),
+    (5000, [45, 100, 230, 500, 1100, 2400, 5300], [45, 100, 230, 500, 1100, 2400, 5300]),
+    (15000, [100, 230, 500, 1100, 2400, 5300, 11500], [100, 230, 500, 1100, 2400, 5300, 11500]),
 ]
 
 EVALUATION_WINDOW_MINUTES = 15
@@ -243,6 +245,8 @@ class DoubleMartingaleBot:
             if max_profit_pct is not None
             else float(app_config.MAX_PROFIT_PCT)
         )
+        self.auto_evaluate = True
+        self.auto_bracket_enabled = True
         self.budget_tiers = self._enforce_standard_budget_tiers()
         self.account_type = account_type
         self.active_balance_id = None
@@ -500,7 +504,10 @@ class DoubleMartingaleBot:
         Build tier list. Currently uses a single 9-step sequence.
         Skipped while on any tier above T0 (mid-round) or in CRM (legacy) to avoid
         changing amounts during an active sequence.
+        Build tier list. Skipped if mid-round or if auto-bracket is disabled.
         """
+        if not getattr(self, 'auto_bracket_enabled', True):
+            return
         if getattr(self, 'current_tier_index', 0) > 0 or getattr(self, 'crm_mode', False):
             return
         if balance is None:
@@ -7090,6 +7097,13 @@ class DoubleMartingaleBot:
                     logger.warning(f"Invalid budget_tiers format: {raw}")
         else:
             self._apply_standard_budget_tiers()
+            
+        if "auto_bracket_enabled" in new_config:
+            self.auto_bracket_enabled = bool(new_config["auto_bracket_enabled"])
+            logger.info(f"Config update: auto_bracket_enabled={self.auto_bracket_enabled}")
+            if self.auto_bracket_enabled:
+                self._update_budget_tiers_for_balance()
+
         if "strategy_mode" in new_config:
             self.strategy_mode = new_config["strategy_mode"]
         if "account_type" in new_config and new_config["account_type"] != self.account_type:
