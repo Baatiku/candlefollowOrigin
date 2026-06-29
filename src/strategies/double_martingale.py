@@ -2072,13 +2072,14 @@ class DoubleMartingaleBot:
         
         try:
             # Need enough candles for ADX + lookback
-            candles = self._get_candles_safe(asset_name, 300, adx_period * 2 + lookback, time.time())
+            tf = int(getattr(app_config, "FOLLOW_CANDLE_TIMEFRAME", 60))
+            candles = self._get_candles_safe(asset_name, tf, adx_period * 2 + lookback, time.time())
             if not candles or len(candles) < lookback + 1:
-                result["reason"] = "Not enough 5m candles"
+                result["reason"] = f"Not enough {tf}s candles"
                 return result
                 
             # The last candle in the array from IQ Option is the currently forming candle.
-            # We strictly want the direction of the LAST FULLY CLOSED 5-minute candle.
+            # We strictly want the direction of the LAST FULLY CLOSED candle.
             closed_candles = candles[:-1] if len(candles) > 1 else candles
             if not closed_candles:
                 result["reason"] = "No closed candles"
