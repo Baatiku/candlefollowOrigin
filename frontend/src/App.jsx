@@ -1406,34 +1406,40 @@ function App() {
                     </label>
                   </div>
                   
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Manual Bracket:</label>
-                    <select 
-                      disabled={editAutoBracket}
-                      style={{
-                        padding: '0.4rem',
-                        borderRadius: '4px',
-                        border: '1px solid var(--panel-border)',
-                        background: editAutoBracket ? 'rgba(17,21,28,0.5)' : 'rgba(17,21,28,0.9)',
-                        color: editAutoBracket ? 'var(--text-muted)' : 'var(--text-primary)',
-                        fontSize: '0.85rem',
-                        cursor: editAutoBracket ? 'not-allowed' : 'pointer'
-                      }}
-                      onChange={(e) => {
-                        try {
-                          const parsed = JSON.parse(e.target.value);
-                          setEditTiers([parsed]);
-                        } catch (err) {}
-                      }}
-                    >
-                      <option value="">-- Choose Bracket --</option>
-                      <option value="[1, 3, 9, 20, 45, 100, 230]">$1 - $200 (Base $1)</option>
-                      <option value="[3, 9, 20, 45, 100, 230, 500]">$300 - $500 (Base $3)</option>
-                      <option value="[9, 20, 45, 100, 230, 500, 1100]">$500 - $2,000 (Base $9)</option>
-                      <option value="[20, 45, 100, 230, 500, 1100, 2400]">$2,000 - $5,000 (Base $20)</option>
-                      <option value="[45, 100, 230, 500, 1100, 2400, 5300]">$5,000 - $15,000 (Base $45)</option>
-                      <option value="[100, 230, 500, 1100, 2400, 5300, 11500]">$15,000+ (Base $100)</option>
-                    </select>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Manual Bracket (Applies on next bot start):</label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      {[
+                        { label: 'Base $1', val: [1, 3, 9, 25, 80, 180, 402] },
+                        { label: 'Base $3', val: [3, 9, 27, 75, 240, 540, 1206] },
+                        { label: 'Base $9', val: [9, 27, 81, 225, 720, 1620, 3618] },
+                        { label: 'Base $20', val: [20, 60, 180, 500, 1600, 3600, 8040] },
+                        { label: 'Base $45', val: [45, 135, 405, 1125, 3600, 8100, 18090] },
+                        { label: 'Base $100', val: [100, 300, 900, 2500, 8000, 18000, 40200] }
+                      ].map((bracket, idx) => {
+                        const isSelected = JSON.stringify(editTiers?.[0]) === JSON.stringify(bracket.val);
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            disabled={editAutoBracket}
+                            onClick={() => setEditTiers([bracket.val])}
+                            style={{
+                              padding: '0.4rem 0.8rem',
+                              borderRadius: '4px',
+                              border: isSelected ? '1px solid var(--accent-blue)' : '1px solid var(--panel-border)',
+                              background: isSelected ? 'rgba(56, 189, 248, 0.2)' : (editAutoBracket ? 'rgba(17,21,28,0.5)' : 'rgba(17,21,28,0.9)'),
+                              color: editAutoBracket ? 'var(--text-muted)' : (isSelected ? 'var(--accent-blue)' : 'var(--text-primary)'),
+                              fontSize: '0.8rem',
+                              cursor: editAutoBracket ? 'not-allowed' : 'pointer',
+                              transition: 'all 0.2s ease'
+                            }}
+                          >
+                            {bracket.label}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
                 {editTiers.map((tier, tIdx) => (

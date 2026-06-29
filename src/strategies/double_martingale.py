@@ -109,17 +109,17 @@ DIGITAL_UNSUPPORTED_ASSETS = {
 # Formula: target=L_cum+P; step1=target/(3×0.85); step2=(target+step1)/(2×0.85); step3=(target+step1+step2)/0.85
 # Tier is determined solely by current balance. On exhaustion: clear debt, reset to step 1.
 STANDARD_BUDGET_TIERS = [
-    [1, 3, 9, 20, 45, 100, 230],
+    [1, 3, 9, 25, 80, 180, 402],
 ]
 
 # Balance-proportional tier table.
 BALANCE_TIER_TABLE = [
-    (0, [1, 3, 9, 20, 45, 100, 230], [1, 3, 9, 20, 45, 100, 230]),
-    (300, [3, 9, 20, 45, 100, 230, 500], [3, 9, 20, 45, 100, 230, 500]),
-    (500, [9, 20, 45, 100, 230, 500, 1100], [9, 20, 45, 100, 230, 500, 1100]),
-    (2000, [20, 45, 100, 230, 500, 1100, 2400], [20, 45, 100, 230, 500, 1100, 2400]),
-    (5000, [45, 100, 230, 500, 1100, 2400, 5300], [45, 100, 230, 500, 1100, 2400, 5300]),
-    (15000, [100, 230, 500, 1100, 2400, 5300, 11500], [100, 230, 500, 1100, 2400, 5300, 11500]),
+    (0, [1, 3, 9, 25, 80, 180, 402], [1, 3, 9, 25, 80, 180, 402]),
+    (300, [3, 9, 27, 75, 240, 540, 1206], [3, 9, 27, 75, 240, 540, 1206]),
+    (500, [9, 27, 81, 225, 720, 1620, 3618], [9, 27, 81, 225, 720, 1620, 3618]),
+    (2000, [20, 60, 180, 500, 1600, 3600, 8040], [20, 60, 180, 500, 1600, 3600, 8040]),
+    (5000, [45, 135, 405, 1125, 3600, 8100, 18090], [45, 135, 405, 1125, 3600, 8100, 18090]),
+    (15000, [100, 300, 900, 2500, 8000, 18000, 40200], [100, 300, 900, 2500, 8000, 18000, 40200]),
 ]
 
 EVALUATION_WINDOW_MINUTES = 15
@@ -128,7 +128,7 @@ TIER_SECOND_EXHAUSTION_COOLDOWN_MINUTES = 5
 TIER_FAILURES_BEFORE_ESCALATE = 1
 TIER_1_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
 TIER_HIGHER_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
-LADDER_MAX_STEP_INDEX = 8       # 0-based; 9 steps, no tiers
+LADDER_MAX_STEP_INDEX = 6       # 0-based; 7 steps, no tiers
 RECOVERY_TIER_CEILING = 0      # No tier escalation — single flat sequence only
 # No reserve tiers; the bot never escalates beyond T0.
 ROUND_RESERVE_TIERS = set()   # empty — no reserve tiers
