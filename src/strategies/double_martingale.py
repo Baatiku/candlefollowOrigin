@@ -109,7 +109,8 @@ DIGITAL_UNSUPPORTED_ASSETS = {
 # Formula: target=L_cum+P; step1=target/(3×0.85); step2=(target+step1)/(2×0.85); step3=(target+step1+step2)/0.85
 # Tier is determined solely by current balance. On exhaustion: clear debt, reset to step 1.
 STANDARD_BUDGET_TIERS = [
-    [1, 2, 4, 8, 16, 32, 64, 128, 256],
+    [1, 2, 4, 8],
+    [4, 8, 16, 35]
 ]
 
 # Balance-proportional tier table.
@@ -5445,43 +5446,13 @@ class DoubleMartingaleBot:
 
     def _maybe_escalate_assigned_tier_after_exhaustion(self):
         """
-        Compartmentalised 2-tier active pair system.
-        - T0 exhausted → escalate to T1 (recovery tier for this balance bracket).
-        - T1 exhausted → enter Capital Recovery Mode (CRM) instead of T2/T3/T4.
-        - CRM-T1 exhausted → advance to CRM-T2 (backup).
-        - CRM-T2 exhausted → accept total loss, reset cleanly to balance-floor tier.
-        Always returns False (no hard stop).
+        Custom 2-tier active pair system.
+        - T0 exhausted (4 losses) → escalate to T1 (recovery tier).
+        - T1 exhausted (4 losses) → accept total loss, reset cleanly to T0.
+        Returns False (no hard stop).
         """
-        # ── CRM mode: advance CRM tier or exit on full exhaustion ────────────────
-        if getattr(self, 'crm_mode', False):
-            next_crm = self.crm_tier_index + 1
-            if next_crm < len(self.crm_tiers):
-                self.crm_tier_index = next_crm
-                self.session_round_count = 0
-                amounts = self.crm_tiers[next_crm]
-                logger.warning(
-                    f"💀 CRM-T{next_crm} exhausted → advancing to "
-                    f"CRM-T{next_crm + 1} [{', '.join(f'${x:.0f}' for x in amounts)}]. "
-                    f"Collected ${self.crm_collected:.2f}/{self.crm_target:.2f}."
-                )
-                self._notify(
-                    "CRM tier advanced",
-                    f"CRM-T{next_crm} all steps lost. "
-                    f"Advancing to CRM-T{next_crm + 1}. "
-                    f"Collected ${self.crm_collected:.2f}/{self.crm_target:.2f}.",
-                )
-            else:
-                self._exit_crm(success=False)
-            return False
-
-        # ── Normal mode: sequential 6-tier escalation across 3 rounds ───────────
-        # Structure:
-        #   Round 1: T0 (main) → T1 (reserve)
-        #   Round 2: T2 (main) → T3 (reserve)  triggered when Round 1 is fully lost
-        #   Round 3: T4 (main) → T5 (reserve)  triggered when Round 2 is fully lost
-        #   T5 exhausted → total loss, clean reset to T0
         current_tier = self.assigned_tier_index
-        max_tier = len(self.budget_tiers) - 1  # = 5
+        max_tier = len(self.budget_tiers) - 1
 
         self.tier_failure_streak = 0
         self.tier_recovery_wins = 0
@@ -5493,44 +5464,23 @@ class DoubleMartingaleBot:
             self.assigned_tier_index = next_tier
             self.current_tier_index = next_tier
             ladder = self.budget_tiers[next_tier]
-
-            # Even index = new round's main tier (T2 or T4). Prior round fully lost.
-            if next_tier % 2 == 0:
-                round_num = next_tier // 2 + 1
-                logger.warning(
-                    f"💀 Round {round_num - 1} fully lost → starting Round {round_num} "
-                    f"T{next_tier + 1} [{', '.join(f'${x:.0f}' for x in ladder)}]."
-                )
-                self._notify(
-                    f"Round {round_num} started",
-                    f"Round {round_num - 1} exhausted. "
-                    f"Playing Round {round_num} (T{next_tier + 1}+T{next_tier + 2}).",
-                )
-            else:
-                # T1/T3/T5: reserve tier within the same round (main tier exhausted).
-                # Reset wins counter — the reserve tier needs exactly 3 wins (max) to
-                # fully recover the main tier's loss, regardless of which steps are won.
-                round_num = next_tier // 2 + 1
-                self.reserve_wins_needed = 3
-                logger.warning(
-                    f"💀 T{current_tier + 1} exhausted → Round {round_num} reserve "
-                    f"T{next_tier + 1} [{', '.join(f'${x:.0f}' for x in ladder)}]. "
-                    f"Needs 3 reserve wins to recover."
-                )
-                self._notify(
-                    f"T{current_tier + 1} exhausted",
-                    f"Escalating to T{next_tier + 1} (Round {round_num} reserve). "
-                    f"3 wins needed to recover.",
-                )
-        else:
-            # T5 fully exhausted — accept total loss and reset cleanly to T0.
+            
             logger.warning(
-                f"❌ T5 (Round 3 reserve) exhausted — accepting total loss. "
+                f"💀 T{current_tier + 1} exhausted → Escalating to "
+                f"T{next_tier + 1} [{', '.join(f'${x:.0f}' for x in ladder)}] for recovery."
+            )
+            self._notify(
+                f"T{current_tier + 1} exhausted",
+                f"Escalating to T{next_tier + 1} to recover debt.",
+            )
+        else:
+            logger.warning(
+                f"❌ T{current_tier + 1} (Recovery) exhausted — accepting total loss. "
                 f"Resetting to T0 S1."
             )
             self._notify(
-                "All rounds exhausted",
-                "T5 lost. Accepting total loss and resetting to T0 S1.",
+                "All tiers exhausted",
+                f"T{current_tier + 1} lost. Accepting total loss and resetting to T0 S1.",
             )
             self.current_tier_index = 0
             self.assigned_tier_index = 0

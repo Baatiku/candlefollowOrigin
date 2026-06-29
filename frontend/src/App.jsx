@@ -660,7 +660,7 @@ function App() {
   };
 
   const initTierEditor = () => {
-    const current = config?.budget_tiers || status?.budget_tiers || [[5,11,25],[10,22,50],[20,45,100],[40,90,200]];
+    const current = config?.budget_tiers || status?.budget_tiers || [[1, 2, 4, 8], [4, 8, 16, 35]];
     setEditTiers(current.map(t => [...t]));
     setTierSaveMsg('');
   };
@@ -805,7 +805,7 @@ function App() {
       <div style={overlayStyle}>
         <div style={cardStyle}>
           <h1 style={{ fontSize: '1.75rem', fontWeight: 800, marginBottom: '0.75rem' }}>
-            Welcome to MKU Bot 👋
+            Welcome to YOKE Bot 👋
           </h1>
           <p style={{ color: '#94a3b8', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
             {setupStatus?.is_railway
@@ -893,7 +893,7 @@ function App() {
       <header className="header">
         <div className="header-title">
           <Activity size={20} color="var(--primary)" />
-          MKU Bot
+          YOKE Bot
         </div>
         <div className="header-controls">
           <span style={{ fontSize: '0.78rem', color: status.connected ? 'var(--success)' : 'var(--warning)', fontWeight: 600 }}>
