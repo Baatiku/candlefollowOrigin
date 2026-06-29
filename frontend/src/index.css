@@ -41,10 +41,9 @@ body {
 }
 
 .header {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  position: relative;
   padding: 1.5rem 2rem;
   background: var(--panel-bg);
   backdrop-filter: var(--glass-blur);
@@ -54,12 +53,10 @@ body {
 }
 
 .header-title {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   font-size: 1.5rem;
   font-weight: 700;
   display: flex;
+  justify-content: center;
   align-items: center;
   gap: 0.75rem;
   color: #fff;
@@ -146,9 +143,11 @@ select:hover, select:focus {
 
 .main-grid {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: 1fr;
   gap: 2rem;
-  align-items: start;
+  max-width: 900px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 @media (max-width: 960px) {

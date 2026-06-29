@@ -885,11 +885,12 @@ function App() {
       )}
 
       <header className="header">
+        <div className="header-left"></div>
         <div className="header-title">
           <Activity size={26} color="var(--primary)" />
           BestaBot
         </div>
-        <div className="header-controls">
+        <div className="header-controls" style={{ justifyContent: 'flex-end' }}>
           <span style={{ fontSize: '0.85rem', color: status.connected ? '#10b981' : '#f59e0b' }}>
             {status.connecting ? 'Connecting…' : status.connected ? 'Connected' : 'Disconnected'}
           </span>
