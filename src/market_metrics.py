@@ -1,6 +1,7 @@
-import config as app_config
 """Pure market metrics for straddle suitability (shared by bot and analysis)."""
 from __future__ import annotations
+
+import config as app_config
 
 
 def candle_ohlc(candle: dict) -> tuple[float, float, float, float]:
