@@ -945,46 +945,7 @@ function App() {
               </button>
             )}
             
-            {/* AI Status Card */}
-            <div style={{ marginTop: '1.5rem', background: config.ai_active ? 'rgba(167,139,250,0.12)' : 'rgba(0,0,0,0.2)', padding: '1rem', borderRadius: '8px', border: config.ai_active ? '1px solid rgba(167,139,250,0.35)' : '1px solid rgba(255,255,255,0.05)', transition: 'all 0.3s ease' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.5rem' }}>
-                <span style={{ fontSize: '1.1rem' }}>🤖</span>
-                <span style={{ fontWeight: 600, fontSize: '0.95rem', color: config.ai_active ? '#e2e8f0' : 'var(--text-muted)' }}>AI Trade Analysis</span>
-                <span style={{ marginLeft: 'auto', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.05em', padding: '0.15rem 0.5rem', borderRadius: '4px', background: config.ai_active ? (config.ai_shadow_mode ? '#7c3aed' : '#059669') : '#374151', color: '#fff' }}>
-                  {config.ai_active ? (config.ai_shadow_mode ? 'SHADOW' : 'ACTIVE') : 'OFF'}
-                </span>
-              </div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                {config.ai_active
-                  ? config.ai_shadow_mode
-                    ? 'AI analyses every trade but never blocks it — observe-only mode.'
-                    : 'AI is live. It approves, rejects, or skips trades based on market context.'
-                  : 'AI is off. Bot uses rule-based signal gates only.'}
-              </div>
-              {config.ai_error_msg ? (
-                <div style={{ marginTop: '0.6rem', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: '6px', padding: '0.5rem 0.65rem' }}>
-                  <div style={{ fontSize: '0.75rem', color: '#fca5a5', fontWeight: 600, marginBottom: '0.25rem' }}>⚠️ AI Disabled — Key Error</div>
-                  <div style={{ fontSize: '0.7rem', color: '#fca5a5', lineHeight: 1.45 }}>{config.ai_error_msg}</div>
-                  <button
-                    type="button"
-                    onClick={() => document.getElementById('ai-analysis-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                    style={{ marginTop: '0.4rem', background: 'rgba(239,68,68,0.2)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: '5px', padding: '0.25rem 0.6rem', color: '#fca5a5', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer' }}
-                  >
-                    Fix AI Key ↓
-                  </button>
-                </div>
-              ) : (
-                <div style={{ marginTop: '0.6rem' }}>
-                  <button
-                    type="button"
-                    onClick={() => document.getElementById('ai-analysis-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                    style={{ background: 'rgba(124,58,237,0.18)', border: '1px solid rgba(167,139,250,0.4)', borderRadius: '6px', padding: '0.3rem 0.75rem', color: '#a78bfa', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer', letterSpacing: '0.02em' }}
-                  >
-                    ⚙️ Go to AI Settings ↓
-                  </button>
-                </div>
-              )}
-            </div>
+
 
             {actionError && <p style={{ color: '#f87171', fontSize: '0.9rem', marginTop: '1rem' }}>{actionError}</p>}
             {!status.running && (status.cumulative_debt > 0 || stepNum > 1) && (
