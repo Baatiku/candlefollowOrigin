@@ -3,25 +3,27 @@ import datetime
 import os
 import sys
 import unittest
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 from strategies.double_martingale import (  # noqa: E402
     STANDARD_BUDGET_TIERS,
+    STEP_FIVE_ROTATION_INDEX,
     TIER_EXHAUSTION_COOLDOWN_MINUTES,
     TIER_SECOND_EXHAUSTION_COOLDOWN_MINUTES,
     MIN_STRADDLE_EFFICIENCY_RATIO,
     MIN_STRADDLE_DIRECTIONAL_SLOPE,
     DoubleMartingaleBot,
+    balance_tier_brackets,
     _TIMEOUT_SENTINEL,
 )
 
 
 class TestLadderInvariants(unittest.TestCase):
-    def test_four_tiers_five_steps_each(self):
-        self.assertEqual(len(STANDARD_BUDGET_TIERS), 4)
-        for tier in STANDARD_BUDGET_TIERS:
-            self.assertEqual(len(tier), 5)
+    def test_standard_tier_has_seven_steps(self):
+        self.assertEqual(len(STANDARD_BUDGET_TIERS), 1)
+        self.assertEqual(len(STANDARD_BUDGET_TIERS[0]), 7)
 
     def test_balance_baseline_tier_thresholds(self):
         bot = DoubleMartingaleBot(simulation_mode=True)
@@ -332,9 +334,9 @@ class TestDirectionalTrendMartingale(unittest.TestCase):
 
 
 class TestTierExhaustionDirectionFlip(unittest.TestCase):
-    """Verify the flipped direction from tier exhaustion survives into the next tier."""
+    """Tier exhaustion no longer flips direction — candle follow picks each minute."""
 
-    def test_tier_exhaust_flips_call_to_put(self):
+    def test_tier_exhaust_keeps_direction(self):
         bot = DoubleMartingaleBot(simulation_mode=True)
         bot.assigned_tier_index = 0
         bot.tier_failure_streak = 0
@@ -343,53 +345,14 @@ class TestTierExhaustionDirectionFlip(unittest.TestCase):
         bot.cumulative_debt = 100.0
         bot.session_profit = -13.0
         bot.last_trend_direction = "call"
+        bot.auto_select_asset = False
         bot._finalize_session("Tier exhausted")
-        self.assertEqual(bot.last_trend_direction, "put")
+        self.assertEqual(bot.last_trend_direction, "call")
         self.assertEqual(bot.current_tier_index, 0)
         self.assertEqual(bot.session_round_count, 0)
 
-    def test_tier_exhaust_flips_put_to_call(self):
-        bot = DoubleMartingaleBot(simulation_mode=True)
-        bot.assigned_tier_index = 1
-        bot.current_tier_index = 1
-        bot.tier_failure_streak = 0
-        bot.session_round_count = 5
-        bot.cumulative_debt = 200.0
-        bot.session_profit = -65.0
-        bot.last_trend_direction = "put"
-        bot._finalize_session("Tier exhausted")
-        self.assertEqual(bot.last_trend_direction, "call")
-        self.assertEqual(bot.current_tier_index, 1)
-
-    def test_flipped_direction_survives_determine_trend_direction(self):
-        """After tier exhaust flips direction, _determine_trend_direction must
-        respect the flipped direction (last_direction != None) and not override
-        it with a fresh pick — even though session_round_count is 0."""
-        bot = DoubleMartingaleBot(simulation_mode=True)
-        bot._estimate_spot_price = lambda prices: 1.2000
-        # Metrics say uptrend, but we flipped to PUT at tier boundary
-        bot._calculate_trend_metrics = lambda asset, spot, count: (11.0, 0.4)
-        # Mock EMA/ATR — no breach so reversal filter keeps the flipped direction
-        class MockAPI:
-            def get_candles(self, asset, timeframe, count, end_time):
-                return [{"close": 1.2000} for _ in range(20)]
-        bot.api = MockAPI()
-        bot._calculate_atr = lambda asset, count: 0.0100
-        bot._is_momentum_accelerating = lambda asset: (False, 0.005, 0.006)
-
-        # Simulate: tier exhausted flipped to PUT
-        bot.last_trend_direction = "put"
-        bot.session_round_count = 0  # first round of new tier
-
-        # The prep scan pattern now passes last_trend_direction (not None)
-        target_dir = bot._determine_trend_direction(
-            last_direction=bot.last_trend_direction or None
-        )
-        # Should keep PUT despite uptrend metrics (reversal filter blocks the flip back)
-        self.assertEqual(target_dir, "put")
-
     def test_straddle_mode_no_flip(self):
-        """Tier exhaustion direction flip only applies to directional_trend mode."""
+        """Tier exhaustion never flipped straddle mode either."""
         bot = DoubleMartingaleBot(simulation_mode=True, strategy_mode="straddle")
         bot.current_tier_index = 0
         bot.session_round_count = 5
@@ -397,8 +360,44 @@ class TestTierExhaustionDirectionFlip(unittest.TestCase):
         bot.session_profit = -13.0
         bot.last_trend_direction = "call"
         bot._finalize_session("Tier exhausted")
-        # In straddle mode, last_trend_direction should NOT be flipped
         self.assertEqual(bot.last_trend_direction, "call")
+
+
+class TestStepFiveAssetRotation(unittest.TestCase):
+    def test_step_five_win_penalizes_and_switches(self):
+        bot = DoubleMartingaleBot(simulation_mode=True)
+        bot.asset = "EURUSD-OTC"
+        bot.auto_select_asset = True
+        bot.session_round_count = STEP_FIVE_ROTATION_INDEX
+        bot._apply_auto_asset_selection = MagicMock()
+        bot._wait_for_price_data = MagicMock()
+        bot._notify = MagicMock()
+        bot._rotate_asset_after_step_five("win")
+        self.assertIn("EURUSD-OTC", bot.asset_penalty_box)
+        bot._apply_auto_asset_selection.assert_called_once()
+
+    def test_step_four_does_not_rotate(self):
+        bot = DoubleMartingaleBot(simulation_mode=True)
+        bot.asset = "EURUSD-OTC"
+        bot.session_round_count = STEP_FIVE_ROTATION_INDEX - 1
+        bot._apply_auto_asset_selection = MagicMock()
+        bot._rotate_asset_after_step_five("loss")
+        self.assertNotIn("EURUSD-OTC", bot.asset_penalty_box)
+        bot._apply_auto_asset_selection.assert_not_called()
+
+
+class TestBalanceTierBrackets(unittest.TestCase):
+    def test_highest_matching_row_for_six_hundred(self):
+        bot = DoubleMartingaleBot(simulation_mode=True)
+        bot.auto_bracket_enabled = True
+        bot.current_tier_index = 0
+        bot._update_budget_tiers_for_balance(600.0)
+        self.assertEqual(bot.budget_tiers[0][0], 9)
+
+    def test_bracket_labels_include_ranges(self):
+        brackets = balance_tier_brackets()
+        self.assertTrue(any(b["range_label"].startswith("$500") for b in brackets))
+        self.assertEqual(brackets[0]["min_balance"], 0)
 
 
 class TestPairGateHelpers(unittest.TestCase):

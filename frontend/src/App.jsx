@@ -61,6 +61,7 @@ function App() {
   const [editTiers, setEditTiers] = useState(null);
   const [editAutoBracket, setEditAutoBracket] = useState(true);
   const [tierSaveMsg, setTierSaveMsg] = useState('');
+  const [balanceTierBrackets, setBalanceTierBrackets] = useState([]);
   const [aiComparison, setAiComparison] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [optLogs, setOptLogs] = useState(null);
@@ -142,6 +143,7 @@ function App() {
         ]);
         const cfg = await configRes.json();
         setConfig(cfg);
+        setBalanceTierBrackets(cfg.balance_tier_brackets || []);
         setAccounts((await accountsRes.json()).accounts || []);
         setTrades((await tradesRes.json()).trades || []);
         const assetsRes = await apiFetch('/assets');
@@ -661,18 +663,36 @@ function App() {
   };
 
   const initTierEditor = () => {
-    const current = config?.budget_tiers || status?.budget_tiers || [[1, 3, 9, 20, 45, 100, 230]];
+    const current = config?.budget_tiers || status?.budget_tiers || [[1, 3, 9, 25, 80, 180, 402]];
     setEditTiers(current.map(t => [...t]));
     setEditAutoBracket(config?.auto_bracket_enabled ?? true);
+    setBalanceTierBrackets(config?.balance_tier_brackets || balanceTierBrackets);
     setTierSaveMsg('');
   };
+
+  const defaultBracketPresets = balanceTierBrackets.length > 0
+    ? balanceTierBrackets.map((b) => ({
+        label: `${b.range_label} (Base $${b.base_amount})`,
+        val: b.amounts,
+      }))
+    : [
+        { label: '$0–$299 (Base $1)', val: [1, 3, 9, 25, 80, 180, 402] },
+        { label: '$300–$499 (Base $3)', val: [3, 9, 27, 75, 240, 540, 1206] },
+        { label: '$500–$1,999 (Base $9)', val: [9, 27, 81, 225, 720, 1620, 3618] },
+        { label: '$2,000–$4,999 (Base $20)', val: [20, 60, 180, 500, 1600, 3600, 8040] },
+        { label: '$5,000–$14,999 (Base $45)', val: [45, 135, 405, 1125, 3600, 8100, 18090] },
+        { label: '$15,000+ (Base $100)', val: [100, 300, 900, 2500, 8000, 18000, 40200] },
+      ];
 
   const saveTiers = async () => {
     if (!editTiers) return;
     setTierSaveMsg('');
+    const cleanedTiers = editTiers.map((tier) =>
+      tier.map((amount) => Math.max(1, Number(amount) || 1))
+    );
     try {
       const payload = {
-        budget_tiers: editTiers,
+        budget_tiers: cleanedTiers,
         auto_bracket_enabled: editAutoBracket
       };
       const res = await apiFetch('/config', {
@@ -692,7 +712,8 @@ function App() {
         return;
       }
       setTierSaveMsg('Tiers saved!');
-      setConfig({ ...config, budget_tiers: editTiers, auto_bracket_enabled: editAutoBracket });
+      setEditTiers(cleanedTiers);
+      setConfig({ ...config, budget_tiers: cleanedTiers, auto_bracket_enabled: editAutoBracket });
       setTimeout(() => setTierSaveMsg(''), 3000);
     } catch (err) {
       setTierSaveMsg('Could not reach server');
@@ -1374,7 +1395,12 @@ function App() {
                 </button>
               ) : (
                 <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                  <button type="button" className="btn-save" style={{ padding: '0.35rem 1rem', fontSize: '0.8rem', minHeight: 'unset' }} onClick={saveTiers}>
+                  <button
+                    type="button"
+                    className="btn-save"
+                    style={{ padding: '0.35rem 1rem', fontSize: '0.8rem', minHeight: 'unset' }}
+                    onClick={(e) => { e.preventDefault(); saveTiers(); }}
+                  >
                     Save
                   </button>
                   <button type="button" className="btn-secondary" style={{ fontSize: '0.8rem' }} onClick={() => setEditTiers(null)}>
@@ -1409,14 +1435,7 @@ function App() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Manual Bracket (Applies on next bot start):</label>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                      {[
-                        { label: 'Base $1', val: [1, 3, 9, 25, 80, 180, 402] },
-                        { label: 'Base $3', val: [3, 9, 27, 75, 240, 540, 1206] },
-                        { label: 'Base $9', val: [9, 27, 81, 225, 720, 1620, 3618] },
-                        { label: 'Base $20', val: [20, 60, 180, 500, 1600, 3600, 8040] },
-                        { label: 'Base $45', val: [45, 135, 405, 1125, 3600, 8100, 18090] },
-                        { label: 'Base $100', val: [100, 300, 900, 2500, 8000, 18000, 40200] }
-                      ].map((bracket, idx) => {
+                      {defaultBracketPresets.map((bracket, idx) => {
                         const isSelected = JSON.stringify(editTiers?.[0]) === JSON.stringify(bracket.val);
                         return (
                           <button
@@ -1453,8 +1472,10 @@ function App() {
                             type="number"
                             value={amount}
                             onChange={(e) => {
+                              const raw = e.target.value;
+                              const parsed = raw === '' ? '' : Number(raw);
                               const newTiers = editTiers.map(t => [...t]);
-                              newTiers[tIdx][sIdx] = Number(e.target.value);
+                              newTiers[tIdx][sIdx] = parsed;
                               setEditTiers(newTiers);
                             }}
                             style={{
@@ -1469,6 +1490,7 @@ function App() {
                               fontWeight: 600
                             }}
                             min="1"
+                            step="1"
                           />
                         </div>
                       ))}
@@ -1497,8 +1519,13 @@ function App() {
                 ))}
               </div>
             ) : (
-              /* ── Read-only Table ── */
+            /* ── Read-only Table ── */
               <div style={{ overflowX: 'auto' }}>
+                {config?.auto_bracket_enabled !== false && balanceTierBrackets.length > 0 && (
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                    Auto-bracket ranges: {balanceTierBrackets.map((b) => b.range_label).join(' · ')}
+                  </p>
+                )}
                 {tiers.length === 0 ? (
                   <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textAlign: 'center' }}>No tiers configured</p>
                 ) : (

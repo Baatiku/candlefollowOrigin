@@ -6,7 +6,7 @@
       "account_type": "PRACTICE",
       "balance_id": null,
       "asset": "GBPJPY-OTC",
-      "cumulative_debt": 0.0,
+      "cumulative_debt": 100.0,
       "current_tier_index": 0,
       "session_round_count": 0,
       "session_profit": 0.0,
@@ -28,18 +28,18 @@
       "tier_failure_streak": 0,
       "tier_recovery_wins": 0,
       "window_profit": 0.0,
-      "evaluation_window_start": "2026-06-19T14:15:00Z",
+      "evaluation_window_start": "2026-06-30T10:00:00Z",
       "tier_exhaustion_cooldown_until": null,
       "last_tier_exhaustion_at": null,
       "window_had_tier_exhaustion": false,
-      "last_stop_reason": "API started \u2014 not connected",
+      "last_stop_reason": "Tier exhausted",
       "last_error": "Initial IQ Option connection failed \u2014 retrying",
       "inflight_trade_ids": [],
-      "session_peak_balance": 0.0,
+      "session_peak_balance": 600.0,
       "locked_profit": 0.0,
       "risk_mode_until": null,
       "mopup_initial_debt": 0.0,
-      "ladder_attempt_id": 0,
+      "ladder_attempt_id": 7,
       "ladder_pair": null,
       "ladder_loss_scores": [],
       "crm_mode": false,
@@ -47,7 +47,7 @@
       "crm_tier_index": 0,
       "crm_target": 0.0,
       "crm_collected": 0.0,
-      "saved_at": "2026-06-22T12:07:19.672356Z"
+      "saved_at": "2026-06-30T10:08:27.326522Z"
     }
   }
 }

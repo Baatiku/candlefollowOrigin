@@ -122,6 +122,31 @@ BALANCE_TIER_TABLE = [
     (15000, [100, 300, 900, 2500, 8000, 18000, 40200], [100, 300, 900, 2500, 8000, 18000, 40200]),
 ]
 
+# Human step 5 → 0-based ladder index 4. Win/loss here triggers pair rotation.
+STEP_FIVE_ROTATION_INDEX = 4
+STEP_FIVE_ASSET_PENALTY_MINUTES = 30
+
+
+def balance_tier_brackets():
+    """Balance ranges and ladder amounts for UI / API (highest matching row wins)."""
+    rows = []
+    for i, (min_bal, t0, _t1) in enumerate(BALANCE_TIER_TABLE):
+        next_min = BALANCE_TIER_TABLE[i + 1][0] if i + 1 < len(BALANCE_TIER_TABLE) else None
+        if next_min is not None:
+            range_label = f"${min_bal:,}–${next_min - 1:,}"
+        else:
+            range_label = f"${min_bal:,}+"
+        rows.append(
+            {
+                "min_balance": min_bal,
+                "max_balance": (next_min - 1) if next_min is not None else None,
+                "range_label": range_label,
+                "base_amount": t0[0],
+                "amounts": list(t0),
+            }
+        )
+    return rows
+
 EVALUATION_WINDOW_MINUTES = 15
 TIER_EXHAUSTION_COOLDOWN_MINUTES = 5
 TIER_SECOND_EXHAUSTION_COOLDOWN_MINUTES = 5
@@ -512,17 +537,26 @@ class DoubleMartingaleBot:
             return
         if balance is None:
             balance = self.safe_get_balance()
-        for min_bal, t0, t1 in BALANCE_TIER_TABLE:
+        matched = None
+        for min_bal, t0, t1 in reversed(BALANCE_TIER_TABLE):
             if balance >= min_bal:
-                new_tiers = [list(t0)]
-                if new_tiers != getattr(self, 'budget_tiers', None):
-                    self.budget_tiers = new_tiers
-                    logger.info(
-                        f"📊 Tier bracket updated for balance ${balance:.2f} "
-                        f"(≥${min_bal:,}): "
-                        f"T0={t0}"
-                    )
-                return
+                matched = (min_bal, t0, t1)
+                break
+        if matched is None:
+            return
+        min_bal, t0, _t1 = matched
+        new_tiers = [list(t0)]
+        if new_tiers != getattr(self, 'budget_tiers', None):
+            self.budget_tiers = new_tiers
+            bracket = next(
+                (b for b in balance_tier_brackets() if b["min_balance"] == min_bal),
+                None,
+            )
+            range_label = bracket["range_label"] if bracket else f"≥${min_bal:,}"
+            logger.info(
+                f"📊 Tier bracket updated for balance ${balance:.2f} "
+                f"({range_label}): T0={t0}"
+            )
 
     def _iq_balance_id(self):
         if self.active_balance_id is not None:
@@ -1531,6 +1565,44 @@ class DoubleMartingaleBot:
             datetime.datetime.utcnow() + datetime.timedelta(minutes=mins)
         )
         logger.warning(f"{self.asset} penalized {mins}m — {reason}")
+
+    def _apply_asset_penalty_uncapped(self, asset, minutes, reason):
+        """Penalty box entry without the short 5-minute clamp used for gate skips."""
+        mins = max(1, int(minutes))
+        until = datetime.datetime.utcnow() + datetime.timedelta(minutes=mins)
+        self.asset_penalty_box[asset] = until
+        logger.warning(
+            f"{asset} penalized {mins}m — {reason} "
+            f"(until {until.strftime('%H:%M')} UTC)"
+        )
+
+    def _rotate_asset_after_step_five(self, outcome):
+        """
+        Step 5 win or loss: the pair is too risky to keep — 30m ban and switch.
+        Only fires on the trade that completed at human step 5 (index 4).
+        """
+        if self.session_round_count != STEP_FIVE_ROTATION_INDEX:
+            return
+        asset = self.asset
+        self._apply_asset_penalty_uncapped(
+            asset,
+            STEP_FIVE_ASSET_PENALTY_MINUTES,
+            f"step 5 {outcome} — risky pair rotation",
+        )
+        self._notify(
+            "Pair rotated",
+            f"{asset} reached step 5 ({outcome}). "
+            f"Banned {STEP_FIVE_ASSET_PENALTY_MINUTES}m; switching pair.",
+        )
+        if self.auto_select_asset:
+            self._apply_auto_asset_selection(reason=f"step 5 {outcome} rotation")
+            self._wait_for_price_data()
+        else:
+            self.last_asset_selection_note = (
+                f"{asset} hit step 5 ({outcome}). "
+                f"Pick another pair or enable auto-select."
+            )
+            logger.warning(self.last_asset_selection_note)
 
     def _check_deep_sequence_strike(self, completed_step: int):
         """
@@ -5915,12 +5987,6 @@ class DoubleMartingaleBot:
             if not hard_stop:
                 self.session_round_count = 0
                 self._reset_ladder_tracking()
-            if self.strategy_mode == "directional_trend" and self.last_trend_direction:
-                old_dir = self.last_trend_direction
-                self.last_trend_direction = "put" if old_dir == "call" else "call"
-                logger.warning(
-                    f"🔄 TIER EXHAUSTED: Flipping base trend direction from {old_dir.upper()} to {self.last_trend_direction.upper()} for Tier {self.current_tier_index + 1}."
-                )
             if self.auto_select_asset:
                 self._apply_auto_asset_selection(reason="tier exhausted penalty")
         elif reason.startswith("Round Won"):
@@ -6422,31 +6488,11 @@ class DoubleMartingaleBot:
                         if self.strategy_mode == "directional_trend"
                         else (call_info or put_info)
                     )
-                    sniper_reason = "skipped"
-                    if self.strategy_mode == "directional_trend":
-                        sniper_ok, sniper_reason = self._wait_for_micro_pullback_entry(
-                            target_dir
-                        )
-                        if not sniper_ok:
-                            self._skip_to_next_entry_window(
-                                sniper_reason or "sniper unfavorable"
-                            )
-                            continue
-                        strikes = self._get_best_directional_strike(
-                            target_dir, for_entry_timing=True
-                        )
-                        if not strikes:
-                            self._skip_to_next_entry_window("no strikes after sniper")
-                            continue
-                        leg_info = strikes
-                        call_info = leg_info if target_dir == "call" else None
-                        put_info = leg_info if target_dir == "put" else None
-                        _eval_leg = leg_info
 
                     self._pending_trade_context = self._build_trade_evaluation_context(
                         _eval_dir, _eval_leg, entry_quality
                     )
-                    self._pending_trade_context["sniper_result"] = sniper_reason
+                    self._pending_trade_context["sniper_result"] = "disabled"
 
                     self._log_entry_timing("pre-placement")
                     self._capture_entry_snapshot_at_placement()
@@ -6471,85 +6517,6 @@ class DoubleMartingaleBot:
                             ok, order_id = self._place_trade(leg_info["symbol"], self.current_bet, direction=target_dir)
                             call_ok, call_id = (ok, order_id) if target_dir == "call" else (False, None)
                             put_ok, put_id = (ok, order_id) if target_dir == "put" else (False, None)
-
-                            # --- Intra-Expiry Pullback Re-entry Logic ---
-                            _pullback_order_ids = []  # collect separately so main reset doesn't lose them
-                            if ok and order_id:
-                                # For turbo mode, use spot price as entry reference
-                                with self._price_lock:
-                                    _pb_prices = list(self._price_data.get(60, []))
-                                _spot_at_entry = self._estimate_spot_price(_pb_prices)
-                                if leg_info.get("strike") is not None:
-                                    entry_strike = float(leg_info["strike"])
-                                elif _spot_at_entry:
-                                    entry_strike = float(_spot_at_entry)
-                                else:
-                                    entry_strike = 0.0
-                                atr = self._calculate_atr(self.asset, count=5)
-                                logger.info(f"Monitoring for intra-expiry pullback. Entry ref: {entry_strike:.6f}, ATR: {atr:.6f}")
-                                
-                                pullbacks_placed = 0
-                                # Poll price until placement cutoff to catch a pullback
-                                pb_start = time.time()
-                                while self.running:
-                                    if self.trading_mode == "turbo":
-                                        if time.time() - pb_start > 25.0:
-                                            break
-                                    else:
-                                        if self._too_late_to_place():
-                                            break
-                                    pb_poll = float(
-                                        getattr(app_config, "SNIPER_POLL_INTERVAL_SEC", 0.1)
-                                    )
-                                    time.sleep(pb_poll)
-                                    with self._price_lock:
-                                        prices = list(self._price_data.get(60, []))
-                                    spot = self._estimate_spot_price(prices)
-                                    if spot and spot > 0:
-                                        pullback = False
-                                        pb_threshold = float(
-                                            getattr(app_config, "SNIPER_PULLBACK_ATR", 0.05)
-                                        ) * atr
-                                        if target_dir == "call" and (entry_strike - spot) >= pb_threshold:
-                                            pullback = True
-                                            logger.warning(
-                                                f"📉 Pullback {pullbacks_placed+1} detected! "
-                                                f"CALL ref: {entry_strike:.6f}, spot: {spot:.6f} "
-                                                f"(drop {entry_strike-spot:.6f} >= {pb_threshold:.6f})"
-                                            )
-                                        elif target_dir == "put" and (spot - entry_strike) >= pb_threshold:
-                                            pullback = True
-                                            logger.warning(
-                                                f"📈 Pullback {pullbacks_placed+1} detected! "
-                                                f"PUT ref: {entry_strike:.6f}, spot: {spot:.6f} "
-                                                f"(rise {spot-entry_strike:.6f} >= {pb_threshold:.6f})"
-                                            )
-                                        
-                                        if pullback:
-                                            # Ensure trend is still intact (no confirmed reversal)
-                                            current_dir = self._determine_trend_direction(last_direction=target_dir)
-                                            if current_dir == target_dir:
-                                                # Use the NEXT martingale step amount for the pullback trade to instantly recover the likely loss
-                                                next_step_idx = min(self.session_round_count + 1 + pullbacks_placed, self.session_max_rounds - 1)
-                                                pb_bet = float(self.budget_tiers[self.current_tier_index][next_step_idx])
-                                                
-                                                logger.info(f"🔄 Trend remains {target_dir.upper()}! Placing pullback re-entry #{pullbacks_placed+1} (${pb_bet:.2f}) at current spot {spot:.6f}...")
-                                                # Fetch fresh strike at the pullback spot
-                                                pb_strike = self._get_best_directional_strike(target_dir, for_entry_timing=True)
-                                                if pb_strike:
-                                                    pb_ok, pb_order_id = self._place_trade(pb_strike["symbol"], pb_bet, direction=target_dir, skip_validation=True)
-                                                    if pb_ok and pb_order_id:
-                                                        _pullback_order_ids.append(int(pb_order_id))
-                                                        logger.info(f"🎯 Pullback trade #{pullbacks_placed+1} successfully placed: ID={pb_order_id} Amount=${pb_bet:.2f}")
-                                            
-                                            # Update the reference strike to the new spot price so it has to drop ANOTHER 0.15 ATR to trigger again
-                                            entry_strike = spot
-                                            pullbacks_placed += 1
-                                            
-                                            # Cap at maximum 2 extra trades per session (3 trades total) to prevent blowing account
-                                            if pullbacks_placed >= 2:
-                                                logger.info("Maximum pullbacks (2) reached for this session. Waiting for expiry.")
-                                                break
                         else:
                             logger.info(
                                 f"LADDER ORDER — Tier {bd.get('tier_number', '?')} "
@@ -6570,9 +6537,6 @@ class DoubleMartingaleBot:
                             self._inflight_trade_ids.append(int(call_id))
                         if put_ok and put_id:
                             self._inflight_trade_ids.append(int(put_id))
-                        # Re-attach any pullback order IDs that were placed during the intra-expiry monitor
-                        if self.strategy_mode == "directional_trend":
-                            self._inflight_trade_ids.extend(_pullback_order_ids)
                         if (self.strategy_mode == "directional_trend" and (call_ok or put_ok)) or (call_ok and put_ok):
                             self._pair_filter_skip_streak[self.asset] = 0
                         self.persist_state("trades placed")
@@ -6747,10 +6711,12 @@ class DoubleMartingaleBot:
                         logger.info(
                             f"ROUND WON — at least one leg profitable (Tier {self.current_tier_index + 1})."
                         )
+                        self._rotate_asset_after_step_five("win")
                         self._consecutive_full_ladder_losses = 0
                         self._finalize_session("Round Won")
                     else:
-                        # One ladder step per round; intra-expiry pullbacks recover within the step.
+                        self._rotate_asset_after_step_five("loss")
+                        # One ladder step per round.
                         steps_consumed = 1
                             
                         next_step = self.session_round_count + steps_consumed
@@ -7101,9 +7067,7 @@ class DoubleMartingaleBot:
                     logger.info(f"Budget tiers updated: {self.budget_tiers}")
                 else:
                     logger.warning(f"Invalid budget_tiers format: {raw}")
-        else:
-            self._apply_standard_budget_tiers()
-            
+
         if "auto_bracket_enabled" in new_config:
             self.auto_bracket_enabled = bool(new_config["auto_bracket_enabled"])
             logger.info(f"Config update: auto_bracket_enabled={self.auto_bracket_enabled}")

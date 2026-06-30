@@ -14,7 +14,11 @@ import threading
 import time
 from datetime import datetime
 from typing import Any, List, Optional
-from strategies.double_martingale import DoubleMartingaleBot, STANDARD_BUDGET_TIERS
+from strategies.double_martingale import (
+    DoubleMartingaleBot,
+    STANDARD_BUDGET_TIERS,
+    balance_tier_brackets,
+)
 from trade_log import (
     read_trades,
     read_trades_for_export,
@@ -498,9 +502,12 @@ def run_simulation(body: SimulateRequest):
 
 @app.get("/api/config")
 def get_config():
+    tiers = bot.budget_tiers if getattr(bot, "budget_tiers", None) else STANDARD_BUDGET_TIERS
     return {
         "asset": bot.asset,
-        "budget_tiers": STANDARD_BUDGET_TIERS,
+        "budget_tiers": tiers,
+        "balance_tier_brackets": balance_tier_brackets(),
+        "auto_bracket_enabled": getattr(bot, "auto_bracket_enabled", True),
         "account_type": bot.account_type,
         "avoid_markets": bot.avoid_markets,
         "asset_candidates": bot.asset_candidates,

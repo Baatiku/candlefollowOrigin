@@ -115,8 +115,8 @@ MIN_RECENT_WIN_RATE_STEP3     = float(os.getenv("MIN_RECENT_WIN_RATE_STEP3",  "0
 MIN_RECENT_TRADES_FOR_RATE    = int(  os.getenv("MIN_RECENT_TRADES_FOR_RATE", "4"))     # min trades before win-rate is used
 PAIR_RECENT_RESULT_WINDOW     = int(  os.getenv("PAIR_RECENT_RESULT_WINDOW",  "6"))     # rolling window size for per-asset results
 
-# Micro-pullback sniper
-SNIPER_ENTRY_ENABLED = os.getenv("SNIPER_ENTRY_ENABLED", "true").lower() == "true"
+# Micro-pullback sniper (disabled — strict candle follow fires at entry window)
+SNIPER_ENTRY_ENABLED = os.getenv("SNIPER_ENTRY_ENABLED", "false").lower() == "true"
 SNIPER_PULLBACK_ATR = float(os.getenv("SNIPER_PULLBACK_ATR", "0.05"))
 SNIPER_MAX_WAIT_SEC = float(os.getenv("SNIPER_MAX_WAIT_SEC", "12"))
 SNIPER_POLL_INTERVAL_SEC = float(os.getenv("SNIPER_POLL_INTERVAL_SEC", "0.1"))
