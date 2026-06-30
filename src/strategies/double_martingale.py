@@ -1,53 +1,8 @@
 """
-Double Martingale Digital Options Strategy for IQ Option.
+Candle Follow directional turbo bot with martingale ladder recovery.
 
-Strategy:
-1. Subscribe to client-price-generated for live strike data
-2. For each 1-minute expiry window, find the closest OTM strikes with >= min profit % (default 145%)
-3. Place simultaneous CALL + PUT at those OTM strikes
-4. If any side wins, the profit covers the losing side
-5. If both lose, increase bet (Martingale) to recover on next round
-
-Recovery-ladder tier design (5 balance-based tiers, 3 steps each):
-  T0 (micro-baseline): classic 1:3:9 ratio, used while balance < $1,000.
-  T1–T4: cumulative-recovery chain at 85% payout.
-  Each step of tier N can recover ALL previous tiers' combined max losses:
-    • Step 1 × 3 wins  at 85% covers sum(T0..T(n-1)) losses + small profit
-    • Step 2 net × 2 wins at 85% covers sum(T0..T(n-1)) losses + small profit
-    • Step 3 net × 1 win  at 85% covers sum(T0..T(n-1)) losses + small profit
-
-  Formula (L_cum = sum of all previous tiers' max losses, P = profit target):
-    target = L_cum + P
-    step1 = target / (3 × 0.85)
-    step2 = (target + step1) / (2 × 0.85)
-    step3 = (target + step1 + step2) / 0.85
-
-- T0 ($0–$999):       $1,    $3,    $9     | max loss=$13   | L_cum(T1)=$13
-- T1 ($1k–$2,999):    $6,    $15,   $42    | max loss=$63   | L_cum(T2)=$76
-- T2 ($3k–$14,999):   $32,   $67,   $212   | max loss=$311  | L_cum(T3)=$387
-- T3 ($15k–$74,999):  $156,  $326,  $1,035 | max loss=$1,517| L_cum(T4)=$1,904
-- T4 ($75k+):         $755,  $1,576,$5,006 | max loss=$7,337
-
-Step rules:
-- WIN at any step  → reset to step 1 of the current balance-based tier
-- LOSE at any step → advance to next step of SAME tier
-- LOSE all 3 steps → 5-minute cooldown, clear debt, reset to step 1 — NO tier escalation
-
-Tier selection:
-- Tier is determined ONLY by current account balance at the start of each round.
-- No recovery escalation. If all 3 steps are lost, debt is forgiven and the bot
-  continues trading the same balance-appropriate tier from step 1.
-- When balance grows past a threshold, the bot naturally upgrades to the next tier.
-
-UTC time-ban windows (analysis-backed, 9 days of trade data):
-- HARD BAN: 14:30–16:00 UTC (London+NY overlap — 76% loss rate)
-- HARD BAN: 22:00–00:30 UTC (Sydney/NY close — highest streak magnitude)
-- SOFT BAN: 17:00–20:00 UTC for AMAZON/APPLE OTC only (US market open — erratic OTC pricing)
-
-Timeout rule (FIXED):
-- A timeout waiting for a result means the order CANNOT be confirmed as settled.
-  It must be treated as a LOSS, not a win. $0.00 returned from a timeout is NOT
-  a profit of $0 — we spent money placing the trade.
+Each minute: read last closed 1m candle color → place CALL or PUT turbo option.
+Martingale ladder advances on loss, resets on win; balance-based tier brackets.
 """
 
 import time
@@ -82,16 +37,6 @@ from pair_learning import (
 )
 import iqoptionapi.constants as OP_code
 import random
-from ai_assessment import AITradeAssessor
-from ensemble import (
-    check_enhanced_conviction,
-    check_rule_based_entry_gate,
-    compute_bot_confidence,
-    compute_signal_coherence,
-    resolve_ensemble,
-    should_skip_ai_call,
-)
-from ai_agents import run_optimization_agents
 from risk_governor import compute_risk_limits
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -113,13 +58,13 @@ STANDARD_BUDGET_TIERS = [
 ]
 
 # Balance-proportional tier table (highest matching min_balance wins).
-# Ranges: $1–$299 | $300–$999 | $1k–$2,999 | $3k–$9,999 | $10k–$49,999 | $50k+
+# Ranges: $1–$999 | $1k–$1,999 | $2k–$4,999 | $5k–$24,999 | $25k–$49,999 | $50k+
 BALANCE_TIER_TABLE = [
     (1, [1, 3, 9, 25, 80, 180, 402], [1, 3, 9, 25, 80, 180, 402]),
-    (300, [3, 9, 27, 75, 240, 540, 1206], [3, 9, 27, 75, 240, 540, 1206]),
-    (1000, [9, 27, 81, 225, 720, 1620, 3618], [9, 27, 81, 225, 720, 1620, 3618]),
-    (3000, [20, 60, 180, 500, 1600, 3600, 8040], [20, 60, 180, 500, 1600, 3600, 8040]),
-    (10000, [45, 135, 405, 1125, 3600, 8100, 18090], [45, 135, 405, 1125, 3600, 8100, 18090]),
+    (1000, [3, 9, 27, 75, 240, 540, 1206], [3, 9, 27, 75, 240, 540, 1206]),
+    (2000, [9, 27, 81, 225, 720, 1620, 3618], [9, 27, 81, 225, 720, 1620, 3618]),
+    (5000, [20, 60, 180, 500, 1600, 3600, 8040], [20, 60, 180, 500, 1600, 3600, 8040]),
+    (25000, [45, 135, 405, 1125, 3600, 8100, 18090], [45, 135, 405, 1125, 3600, 8100, 18090]),
     (50000, [100, 300, 900, 2500, 8000, 18000, 40200], [100, 300, 900, 2500, 8000, 18000, 40200]),
 ]
 
@@ -222,8 +167,6 @@ class DoubleMartingaleBot:
     ):
         self.strategy_mode = strategy_mode
         self.trading_mode = trading_mode
-        self.ai_shadow_mode = app_config.AI_SHADOW_MODE
-        self.ai_ensemble_enabled = getattr(app_config, "AI_ENSEMBLE_ENABLED", True)
         self.rule_gate_enabled = getattr(app_config, "RULE_GATE_ENABLED", True)
         self.rule_gate_min_bot_conf = getattr(app_config, "RULE_GATE_MIN_BOT_CONF", 0.35)
         self.rule_gate_min_er = getattr(app_config, "RULE_GATE_MIN_ER", 0.30)
@@ -233,31 +176,6 @@ class DoubleMartingaleBot:
         # Load Config History
         self.config_history_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "config_history.json")
         self.config_history = self._load_config_history()
-
-        # Initialize AI Assessor
-        self.ai_assessor = None
-        self.ai_min_tier = app_config.AI_MIN_TIER
-        if app_config.AI_ASSESSMENT_ENABLED and app_config.GEMINI_API_KEYS:
-            self.ai_assessor = AITradeAssessor(
-                api_keys=app_config.GEMINI_API_KEYS,
-                timeout=app_config.AI_TIMEOUT_SECONDS,
-                key_cooldown=app_config.AI_KEY_COOLDOWN_SECONDS,
-                max_calls_per_minute=getattr(
-                    app_config, "AI_MAX_CALLS_PER_MINUTE_PER_KEY", 4
-                ),
-                live_model=getattr(app_config, "AI_LIVE_MODEL", "gemini-2.5-flash"),
-            )
-            mode = "ensemble" if self.ai_ensemble_enabled else (
-                "shadow" if self.ai_shadow_mode else "gate"
-            )
-            logger.info(
-                f"🤖 AI Assessment ENABLED for Tier >= {self.ai_min_tier} "
-                f"(mode={mode}, {getattr(app_config, 'AI_MAX_CALLS_PER_MINUTE_PER_KEY', 4)} calls/min/key)"
-            )
-        else:
-            logger.info(
-                "🤖 AI Assessment DISABLED — rule-based bot confidence gates only"
-            )
 
         self.asset = asset
         self.asset_id = OP_code.ACTIVES.get(asset, 0)
@@ -295,7 +213,6 @@ class DoubleMartingaleBot:
         self.min_asset_score = min_asset_score
         self.asset_scores = {}
         self.last_asset_selection_note = "Starting up"
-        self.ai_shadow_mode = app_config.AI_SHADOW_MODE
         self.blocked_hours = []
         self.trading_timezone = getattr(app_config, "TRADING_TIMEZONE", "Africa/Lagos")
         self.hour_boundary_block_minutes = int(
@@ -404,16 +321,6 @@ class DoubleMartingaleBot:
         self.stale_trade_alert_minutes = stale_trade_alert_minutes
         self.order_place_retries = max(1, int(order_place_retries))
 
-        # Multi-asset simultaneous trading
-        self.multi_asset_mode = getattr(app_config, "MULTI_ASSET_MODE", False)
-        self.multi_asset_count = getattr(app_config, "MULTI_ASSET_COUNT", 2)
-        self.multi_asset_scale_factors = list(getattr(app_config, "MULTI_ASSET_SCALE_FACTORS", [1.0, 0.6, 0.4]))
-        self.multi_asset_min_score = getattr(app_config, "MULTI_ASSET_MIN_SCORE", 55.0)
-        self.multi_asset_tier_escalate_losses = getattr(app_config, "MULTI_ASSET_TIER_ESCALATE_LOSSES", 3)
-        self.multi_asset_global_stop_loss = getattr(app_config, "MULTI_ASSET_GLOBAL_STOP_LOSS", -150.0)
-        self.multi_asset_global_pause_sec = getattr(app_config, "MULTI_ASSET_GLOBAL_PAUSE_SEC", 900)
-        self._multi_asset_states: dict = {}
-        self._multi_asset_session_profit: float = 0.0
 
         # State
         self.api = None
@@ -505,6 +412,8 @@ class DoubleMartingaleBot:
 
         self._cached_balance = 0.0
         self._balance_lock = threading.Lock()
+        self._trades_since_balance_refresh = 0
+        self._last_full_balance_refresh = None
         self._connect_lock = threading.Lock()
         self._session_ready = threading.Event()
         self._connecting = False
@@ -525,16 +434,16 @@ class DoubleMartingaleBot:
         if not hasattr(self, 'budget_tiers') or not self.budget_tiers:
             self.budget_tiers = self._enforce_standard_budget_tiers()
 
-    def _update_budget_tiers_for_balance(self, balance=None):
+    def _update_budget_tiers_for_balance(self, balance=None, force=False):
         """
-        Build tier list. Currently uses a single 9-step sequence.
-        Skipped while on any tier above T0 (mid-round) or in CRM (legacy) to avoid
-        changing amounts during an active sequence.
-        Build tier list. Skipped if mid-round or if auto-bracket is disabled.
+        Build tier list from balance bracket table.
+        Skipped mid-ladder unless force=True (e.g. periodic balance sync).
         """
         if not getattr(self, 'auto_bracket_enabled', True):
             return
-        if getattr(self, 'current_tier_index', 0) > 0 or getattr(self, 'crm_mode', False):
+        if not force and getattr(self, 'current_tier_index', 0) > 0:
+            return
+        if not force and getattr(self, 'session_round_count', 0) > 0:
             return
         if balance is None:
             balance = self.safe_get_balance()
@@ -625,11 +534,6 @@ class DoubleMartingaleBot:
         self.reserve_wins_needed = 0
         self._recovery_tier_bump = 0
         self._recovery_hard_stopped = False
-        self.crm_mode = False
-        self.crm_tiers = []
-        self.crm_tier_index = 0
-        self.crm_target = 0.0
-        self.crm_collected = 0.0
         bet_info = self._compute_round_bet()
         self.current_bet = bet_info["amount"]
         self.last_bet_breakdown = bet_info
@@ -676,11 +580,6 @@ class DoubleMartingaleBot:
             ).date()
         else:
             self.tier_escalations_date = None
-        self.crm_mode = bool(data.get("crm_mode", False))
-        self.crm_tiers = data.get("crm_tiers") or []
-        self.crm_tier_index = int(data.get("crm_tier_index", 0))
-        self.crm_target = float(data.get("crm_target", 0.0))
-        self.crm_collected = float(data.get("crm_collected", 0.0))
         self.reserve_wins_needed = int(data.get("reserve_wins_needed", 0))
         self.mopup_initial_debt = float(data.get("mopup_initial_debt", 0.0))
         self._apply_evaluation_window_persisted(data)
@@ -1018,6 +917,66 @@ class DoubleMartingaleBot:
                 "accounts": self.get_all_balances(),
             }
 
+    def _realign_tier_after_balance(self, balance):
+        """Re-sync ladder bracket and next bet from the latest balance."""
+        self._sync_assigned_tier_for_trading(balance=balance)
+        bet_info = self._compute_round_bet(balance=balance)
+        self.current_bet = bet_info["amount"]
+        self.last_bet_breakdown = bet_info
+
+    def _run_scheduled_balance_sync(self, reason="scheduled"):
+        """Fetch live balance from IQ Option and re-align tier brackets."""
+        if not self.api or not self._api_alive():
+            self._refresh_balance_cache(allow_blocking=True)
+            return False
+        result = self.force_refresh_balance()
+        if not result.get("ok"):
+            self._refresh_balance_cache(allow_blocking=True)
+            logger.warning(
+                f"Balance sync failed ({reason}): {result.get('error', 'unknown')}"
+            )
+            return False
+        balance = float(result["balance"])
+        self._trades_since_balance_refresh = 0
+        self._last_full_balance_refresh = datetime.datetime.utcnow()
+        self._update_budget_tiers_for_balance(balance=balance, force=True)
+        self._realign_tier_after_balance(balance)
+        logger.info(
+            f"Balance sync ({reason}): ${balance:.2f} — ladder bracket re-aligned"
+        )
+        return True
+
+    def _maybe_sync_balance_after_trade(self):
+        """Light refresh every trade; full IQ API sync every N trades or hours."""
+        self._trades_since_balance_refresh += 1
+        every_n = max(1, int(getattr(app_config, "BALANCE_REFRESH_EVERY_N_TRADES", 3)))
+        min_hours = float(getattr(app_config, "BALANCE_REFRESH_MIN_HOURS", 2.0))
+        last = getattr(self, "_last_full_balance_refresh", None)
+        hours_elapsed = (
+            (datetime.datetime.utcnow() - last).total_seconds() / 3600.0
+            if last
+            else float("inf")
+        )
+        if (
+            self._trades_since_balance_refresh >= every_n
+            or hours_elapsed >= min_hours
+        ):
+            self._run_scheduled_balance_sync(reason="post-trade")
+        else:
+            self._refresh_balance_cache(allow_blocking=True)
+            self._realign_tier_after_balance(self.safe_get_balance())
+
+    def _maybe_sync_balance_idle(self):
+        """Time-based sync while the bot is waiting between rounds."""
+        min_hours = float(getattr(app_config, "BALANCE_REFRESH_MIN_HOURS", 2.0))
+        last = getattr(self, "_last_full_balance_refresh", None)
+        if last is None:
+            return self._run_scheduled_balance_sync(reason="idle-first")
+        hours_elapsed = (datetime.datetime.utcnow() - last).total_seconds() / 3600.0
+        if hours_elapsed >= min_hours:
+            return self._run_scheduled_balance_sync(reason="idle-timer")
+        return False
+
     # ── Connection ───────────────────────────────────────────────────────────
 
     def _api_alive(self):
@@ -1100,7 +1059,7 @@ class DoubleMartingaleBot:
                     logger.warning(f"change_balance({self.account_type}): {e}")
 
                 self._wait_for_profile(timeout=15.0)
-                self._refresh_balance_cache(allow_blocking=False)
+                self._run_scheduled_balance_sync(reason="connect")
                 self._start_balance_refresh_thread()
                 self._session_ready.set()
                 logger.info(
@@ -1413,126 +1372,6 @@ class DoubleMartingaleBot:
             time.sleep(2.0)
             self._cached_pair_learning_summary = pair_learning_summary()
         threading.Thread(target=_run, daemon=True, name="pair-cache-refresh").start()
-
-    def run_ai_agent_pipeline(self):
-        """Runs the Unified Multi-Agent Optimization Pipeline sequentially to prevent race conditions."""
-        if not self.ai_assessor:
-            logger.warning("Cannot run AI optimization: No AI Assessor available.")
-            return
-
-        min_trades = getattr(app_config, "AI_MIN_TRADES_FOR_OPTIMIZATION", 50)
-
-        def _bg_pipeline():
-            try:
-                from trade_log import read_trades
-                from ai_agents import EvaluatorAgent, run_optimization_agents
-
-                trades_for_gate = read_trades(
-                    limit=500, account_key=self._state_account_key()
-                )
-                if len(trades_for_gate) < min_trades:
-                    logger.info(
-                        f"AI pipeline deferred "
-                        f"({len(trades_for_gate)}/{min_trades} trades)."
-                    )
-                    return
-                
-                # 1. EVALUATION PHASE
-                if len(self.config_history) >= 2:
-                    current_record = self.config_history[-1]
-                    previous_record = self.config_history[-2]
-                    
-                    trades = read_trades(limit=200, account_key=self._state_account_key())
-                    try:
-                        curr_ts = datetime.datetime.fromisoformat(current_record["timestamp"]).timestamp()
-                        prev_ts = datetime.datetime.fromisoformat(previous_record["timestamp"]).timestamp()
-                        
-                        def _get_stats(trade_list):
-                            if not trade_list:
-                                return {"trades": 0, "wins": 0, "losses": 0, "win_rate": 0, "pnl": 0.0}
-                            wins = sum(1 for t in trade_list if float(t.get("round_profit", 0)) > 0)
-                            pnl = sum(float(t.get("round_profit", 0)) for t in trade_list)
-                            return {
-                                "trades": len(trade_list),
-                                "wins": wins,
-                                "losses": len(trade_list) - wins,
-                                "win_rate": round(wins / len(trade_list) * 100, 1),
-                                "pnl": round(pnl, 2)
-                            }
-                            
-                        curr_trades = [t for t in trades if t.get("entry_ts", 0) >= curr_ts]
-                        prev_trades = [t for t in trades if prev_ts <= t.get("entry_ts", 0) < curr_ts]
-                        
-                        curr_stats = _get_stats(curr_trades)
-                        prev_stats = _get_stats(prev_trades)
-                        
-                        evaluator = EvaluatorAgent(self.ai_assessor)
-                        eval_result = evaluator.run(
-                            previous_stats=prev_stats,
-                            current_stats=curr_stats,
-                            previous_config=previous_record["config"],
-                            current_config=current_record["config"]
-                        )
-                        eval_result["timestamp"] = datetime.datetime.utcnow().isoformat()
-                        
-                        # Save evaluator logs
-                        log_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "ai_evaluator_log.json")
-                        try:
-                            with open(log_path, "w") as f:
-                                json.dump(eval_result, f, indent=2)
-                        except Exception:
-                            pass
-                            
-                        if eval_result.get("action") == "revert":
-                            logger.warning(f"🔄 Evaluator Agent requested REVERT: {eval_result.get('reasoning')}")
-                            # Restore old config and HALT pipeline (do not optimize further this round)
-                            self.update_config(previous_record["config"], skip_history=False, tag="REVERT")
-                            return
-                            
-                    except ValueError:
-                        pass # Ignore timestamp parse errors and proceed to optimization
-
-                # 2. OPTIMIZATION PHASE (Analyst + Supervisor)
-                min_trades = getattr(app_config, "AI_MIN_TRADES_FOR_OPTIMIZATION", 50)
-                trades = read_trades(limit=30, account_key=self._state_account_key())
-                if len(trades) < min_trades:
-                    logger.info(
-                        f"Not enough trades to run AI optimization "
-                        f"({len(trades)}/{min_trades})."
-                    )
-                    return
-                    
-                current_config = {
-                    "min_efficiency_ratio": getattr(self, "min_efficiency_ratio", 0.25),
-                    "min_directional_slope": getattr(self, "min_directional_slope", 18.5),
-                    "max_doji_streak": getattr(self, "doji_streak_max", 3),
-                    "min_movement_score": getattr(self, "min_asset_score", 1.5)
-                }
-                
-                from pair_learning import pair_learning_summary
-                pair_summary = pair_learning_summary()
-                
-                logger.info("🧠 Spawning Multi-Agent Optimization Phase...")
-                opt_result = run_optimization_agents(self.ai_assessor, trades, current_config, pair_summary)
-                
-                # Save opt logs
-                opt_log_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "ai_opt_log.json")
-                try:
-                    with open(opt_log_path, "w") as f:
-                        json.dump(opt_result, f, indent=2)
-                except Exception as e:
-                    logger.warning(f"Failed to save AI opt log: {e}")
-                
-                updates = opt_result.get("updates", {})
-                if updates:
-                    logger.info(f"✨ Supervisor Agent requested config update: {updates}")
-                    self.update_config(updates)
-                    self.persist_state()
-                    
-            except Exception as e:
-                logger.error(f"Unified AI Agent Pipeline failed: {e}")
-                
-        threading.Thread(target=_bg_pipeline, daemon=True, name="ai-pipeline").start()
 
     def _load_config_history(self):
         if not os.path.exists(self.config_history_path):
@@ -1891,18 +1730,6 @@ class DoubleMartingaleBot:
             )
             return False
         return True
-
-    @staticmethod
-    def _sniper_blocked_by_recovery_momentum(direction, med_slope, short_slope, short_er):
-        """Skip sniper entry when micro-momentum is clearly against the planned side."""
-        if short_er < 0.15:
-            return False
-        direction = (direction or "").lower()
-        if direction == "put":
-            return short_slope >= 15.0 and med_slope > -15.0
-        if direction == "call":
-            return short_slope <= -15.0 and med_slope < 15.0
-        return False
 
     def _calculate_atr(self, asset_name, count=5):
         if not self.api:
@@ -2451,19 +2278,6 @@ class DoubleMartingaleBot:
 
     # ── Multi-asset helpers ──────────────────────────────────────────────────
 
-    def _get_or_init_asset_state(self, name: str) -> dict:
-        """Lazily initialise and return the per-asset step/tier state dict."""
-        if name not in self._multi_asset_states:
-            self._multi_asset_states[name] = {
-                "step_index": 0,
-                "tier_index": 0,
-                "consecutive_losses": 0,
-                "wins": 0,
-                "losses": 0,
-                "asset_profit": 0.0,
-            }
-        return self._multi_asset_states[name]
-
     def _extract_currency_codes(self, asset_name: str) -> list:
         """Return the major currency codes found in an asset name."""
         MAJORS = {"EUR", "GBP", "USD", "JPY", "AUD", "CAD", "CHF", "NZD"}
@@ -2473,289 +2287,6 @@ class DoubleMartingaleBot:
     def _assets_are_correlated(self, a: str, b: str) -> bool:
         """True if two assets share at least one major currency (likely correlated)."""
         return bool(set(self._extract_currency_codes(a)) & set(self._extract_currency_codes(b)))
-
-    def _select_top_n_assets(self, n: int) -> list:
-        """
-        Score all candidate assets, keep only tradeable ones, filter out
-        correlated pairs, and return the top N by straddle score as a list of
-        (asset_name, score_data) tuples ordered best-first.
-        """
-        candidates = self._resolve_asset_candidates()
-        if not candidates:
-            return []
-
-        scores = {}
-        for name in candidates:
-            if not self.running:
-                return self.asset, scores
-            result = self._score_asset_movement(name)
-            scores[name] = result if result else {
-                "score": 0.0, "straddle_score": 0.0, "tradeable": False,
-                "efficiency_ratio": 0.0, "abs_slope": 0.0,
-            }
-
-        tradeable = {k: v for k, v in scores.items() if v.get("tradeable")}
-        if not tradeable:
-            return []
-
-        ranked = sorted(
-            tradeable.items(),
-            key=lambda x: self._asset_rank_score(x[1]),
-            reverse=True,
-        )
-
-        selected = []
-        for name, data in ranked:
-            if len(selected) >= n:
-                break
-            if any(self._assets_are_correlated(name, s[0]) for s in selected):
-                logger.debug(f"Multi-asset: {name} skipped — currency overlap with selected asset")
-                continue
-            score = data.get("straddle_score", data.get("score", 0))
-            if selected and score < self.multi_asset_min_score:
-                logger.debug(
-                    f"Multi-asset: {name} score {score:.0f} < min {self.multi_asset_min_score:.0f} — skipped"
-                )
-                continue
-            selected.append((name, data))
-
-        return selected
-
-    def _multi_asset_bet_amount(self, rank: int, asset_state: dict) -> float:
-        """
-        Compute the scaled bet amount for a ranked asset.
-        rank=0 → full sequential amount; rank=1 → 60%; rank=2 → 40%.
-        """
-        scale_factors = self.multi_asset_scale_factors
-        scale = scale_factors[rank] if rank < len(scale_factors) else scale_factors[-1]
-
-        seq = self.sequential_amounts
-        tier_idx = min(asset_state["tier_index"], len(seq) - 1)
-        step_idx = asset_state["step_index"]
-
-        if seq and isinstance(seq[0], list):
-            tier_amounts = seq[tier_idx]
-            base = float(tier_amounts[step_idx % len(tier_amounts)])
-        else:
-            base = float(seq[step_idx % len(seq)])
-
-        return max(1.0, round(base * scale))
-
-    def _get_asset_direction(self, asset_name: str) -> str:
-        """
-        Determine trade direction for an asset using signed slope of recent candles.
-        Returns 'call' for uptrend, 'put' for downtrend.
-        """
-        try:
-            candles = self._get_candles_safe(asset_name, app_config.FOLLOW_CANDLE_TIMEFRAME, 20, time.time())
-            if not candles or len(candles) < 5:
-                return "call"
-            closes = [c["close"] for c in candles if c.get("close")]
-            if not closes:
-                return "call"
-            spot = closes[-1]
-            slope, _ = self._calculate_trend_metrics(asset_name, spot, count=min(15, len(closes)))
-            return "call" if slope >= 0 else "put"
-        except Exception:
-            return "call"
-
-    def _run_multi_asset_cycle(self) -> bool:
-        """
-        Execute one full simultaneous multi-asset trading cycle:
-          1. Pre-scan all candidates → rank by score, filter correlation
-          2. Determine direction per asset
-          3. Wait for entry window
-          4. Fire all trades simultaneously via ThreadPoolExecutor
-          5. Fetch all results concurrently
-          6. Update per-asset step/tier state independently
-          7. Update global session P/L and check hard stop
-
-        Returns True if the cycle ran normally, False if it was skipped/aborted.
-        """
-        n = self.multi_asset_count
-
-        # ── Global hard stop check ────────────────────────────────────────────
-        if self._multi_asset_session_profit <= self.multi_asset_global_stop_loss:
-            logger.warning(
-                f"🛑 Multi-asset global stop: session P/L "
-                f"${self._multi_asset_session_profit:.2f} ≤ "
-                f"threshold ${self.multi_asset_global_stop_loss:.2f} — "
-                f"pausing {self.multi_asset_global_pause_sec}s then resetting"
-            )
-            self._multi_asset_states.clear()
-            self._multi_asset_session_profit = 0.0
-            if not self._interruptible_sleep(self.multi_asset_global_pause_sec):
-                return False
-            return False
-
-        # ── Phase 1: scan & rank ──────────────────────────────────────────────
-        logger.info(f"\n{'='*55}")
-        logger.info(f"MULTI-ASSET SCAN  (target={n} assets)")
-        logger.info(f"Global session P/L: ${self._multi_asset_session_profit:+.2f}")
-        logger.info(f"{'='*55}")
-
-        selected = self._select_top_n_assets(n)
-
-        if len(selected) < 2:
-            logger.warning(
-                f"Multi-asset: only {len(selected)} qualifying asset(s) found "
-                "(need ≥2) — skipping cycle"
-            )
-            self._skip_to_next_entry_window("insufficient assets (multi)")
-            return False
-
-        current_balance = self.safe_get_balance()
-
-        # ── Phase 2: build trade plans ────────────────────────────────────────
-        trade_plans = []
-        for rank, (asset_name, score_data) in enumerate(selected):
-            state = self._get_or_init_asset_state(asset_name)
-            direction = self._get_asset_direction(asset_name)
-            amount = self._multi_asset_bet_amount(rank, state)
-            er = score_data.get("efficiency_ratio", 0.0)
-            straddle_score = score_data.get("straddle_score", 0.0)
-
-            logger.info(
-                f"  [{rank + 1}] {asset_name:<18} {direction.upper():<5} "
-                f"${amount:>5.0f}  ER={er:.2f}  score={straddle_score:.0f}  "
-                f"T{state['tier_index'] + 1}/S{state['step_index'] + 1}"
-            )
-            trade_plans.append({
-                "rank": rank,
-                "asset": asset_name,
-                "direction": direction,
-                "amount": amount,
-                "state": state,
-            })
-
-        # ── Phase 3: wait for entry window ────────────────────────────────────
-        self._wait_for_next_entry()
-
-        if self._past_entry_hard_abort():
-            logger.warning("Multi-asset: past hard abort after entry wait — skipping")
-            self._skip_to_next_entry_window("past hard abort (multi)")
-            return False
-
-        # ── Phase 4: fire all trades simultaneously ───────────────────────────
-        logger.info(
-            f"🚀 MULTI-ASSET FIRE  "
-            f"{len(trade_plans)} trades  server=:{self._server_second():02d}"
-        )
-
-        def _fire_one(plan):
-            ok, order_id = self._place_trade(
-                plan["asset"],
-                plan["amount"],
-                direction=plan["direction"],
-                skip_validation=True,
-                asset_name=plan["asset"],
-            )
-            return plan, ok, order_id
-
-        placed = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(trade_plans)) as executor:
-            futs = {executor.submit(_fire_one, p): p for p in trade_plans}
-            for fut in concurrent.futures.as_completed(futs):
-                plan, ok, order_id = fut.result()
-                if ok:
-                    logger.info(
-                        f"  ✅ {plan['asset']:<18} {plan['direction'].upper():<5} "
-                        f"${plan['amount']:.0f}  order={order_id}"
-                    )
-                    placed.append((plan, order_id))
-                else:
-                    logger.warning(
-                        f"  ❌ {plan['asset']:<18} {plan['direction'].upper():<5} "
-                        f"${plan['amount']:.0f}  PLACEMENT FAILED"
-                    )
-
-        if not placed:
-            logger.error("Multi-asset: all orders failed — skipping result wait")
-            return False
-
-        self.last_trade_time = time.time()
-
-        # ── Phase 5: fetch all results concurrently ───────────────────────────
-        logger.info(f"⏳ Waiting for {len(placed)} result(s)…")
-
-        def _get_result(plan, order_id):
-            info = {"symbol": plan["asset"], "invest": plan["amount"]}
-            result = self._check_trade_result(order_id, info)
-            return plan, result
-
-        raw_results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(placed)) as executor:
-            futs = {executor.submit(_get_result, p, oid): (p, oid) for p, oid in placed}
-            for fut in concurrent.futures.as_completed(futs):
-                raw_results.append(fut.result())
-
-        # ── Phase 6: process results per asset ───────────────────────────────
-        cycle_profit = 0.0
-        seq = self.sequential_amounts
-
-        for plan, result in raw_results:
-            asset_name = plan["asset"]
-            amount = plan["amount"]
-            state = plan["state"]
-
-            timed_out = result is _TIMEOUT_SENTINEL
-            profit = (-amount) if (timed_out or result is None) else float(result)
-            won = (not timed_out) and (result is not None) and (profit > 0)
-
-            cycle_profit += profit
-            state["asset_profit"] += profit
-
-            if won:
-                state["wins"] += 1
-                state["consecutive_losses"] = 0
-                old_step = state["step_index"]
-                state["step_index"] = 0
-                logger.info(
-                    f"  ✅ WIN  {asset_name:<18} ${amount:.0f} → +${profit:.2f}  "
-                    f"(was S{old_step + 1} → reset S1)"
-                )
-            else:
-                state["losses"] += 1
-                state["consecutive_losses"] += 1
-
-                if seq and isinstance(seq[0], list):
-                    tier_amounts = seq[min(state["tier_index"], len(seq) - 1)]
-                    max_steps = len(tier_amounts)
-                else:
-                    max_steps = len(seq)
-
-                state["step_index"] = (state["step_index"] + 1) % max_steps
-
-                if state["consecutive_losses"] >= self.multi_asset_tier_escalate_losses:
-                    max_tier = (len(seq) - 1) if (seq and isinstance(seq[0], list)) else 0
-                    if state["tier_index"] < max_tier:
-                        state["tier_index"] += 1
-                        state["step_index"] = 0
-                        state["consecutive_losses"] = 0
-                        logger.warning(
-                            f"  📈 {asset_name} escalated → "
-                            f"T{state['tier_index'] + 1} after "
-                            f"{self.multi_asset_tier_escalate_losses} consec losses"
-                        )
-
-                logger.info(
-                    f"  ❌ LOSS {asset_name:<18} ${amount:.0f} → ${profit:.2f}  "
-                    f"next: T{state['tier_index'] + 1}/S{state['step_index'] + 1}  "
-                    f"consec={state['consecutive_losses']}"
-                )
-
-        # ── Phase 7: update global session P/L ───────────────────────────────
-        self._multi_asset_session_profit += cycle_profit
-        self.session_profit += cycle_profit
-        self.total_profit += cycle_profit
-        self._record_window_profit(cycle_profit)
-
-        emoji = "🟢" if cycle_profit >= 0 else "🔴"
-        logger.info(f"\n{emoji} MULTI-ASSET CYCLE  net={cycle_profit:+.2f}  "
-                    f"session={self._multi_asset_session_profit:+.2f}")
-
-        self.persist_state()
-        return True
 
     def _select_best_asset(self, relaxed=False):
         candidates = self._resolve_asset_candidates()
@@ -3122,15 +2653,6 @@ class DoubleMartingaleBot:
         logger.warning(self.last_asset_selection_note)
         return False
 
-    def backtest_pair_readiness(self, asset_name=None, lookback_candles=30):
-        """How often straddle gates would pass on recent 1m candles (no orders)."""
-        from trade_pattern_analysis import backtest_pair_readiness
-
-        asset = asset_name or self.asset
-        if not self.api:
-            return {"error": "not connected", "asset": asset}
-        return backtest_pair_readiness(self.api, asset, lookback_candles=lookback_candles)
-
     # ── Strike Selection ─────────────────────────────────────────────────────
 
     @staticmethod
@@ -3252,97 +2774,6 @@ class DoubleMartingaleBot:
             f"samples={samples}"
         )
 
-    def _get_best_strikes(self, period=app_config.FOLLOW_CANDLE_TIMEFRAME, for_entry_timing=False):
-        """
-        Pick the closest qualifying CALL above spot and PUT below spot so price sits
-        between the two strikes. No trend skew — uses live spot only. Walks outward
-        from ATM at most MAX_STRIKE_LADDER_STEPS_FROM_ATM (never 4+ ladder steps).
-        """
-        with self._price_lock:
-            prices = self._price_data.get(period, [])
-
-        if not prices:
-            return None
-
-        spot = self._estimate_spot_price(prices)
-        if spot is None:
-            logger.warning("Could not estimate spot price for strike selection.")
-            return None
-
-        ladder = self._sorted_strike_ladder(prices)
-        if len(ladder) < 2:
-            logger.warning("Not enough strike levels in feed for straddle.")
-            return None
-
-        by_strike = self._strike_entry_map(prices)
-        atm_idx = min(range(len(ladder)), key=lambda i: abs(ladder[i] - spot))
-        now = self._server_now()
-        max_steps = MAX_STRIKE_LADDER_STEPS_FROM_ATM
-
-        best_call = None
-        call_steps = None
-        for i in range(atm_idx + 1, len(ladder)):
-            steps_from_atm = i - atm_idx
-            if steps_from_atm > max_steps:
-                break
-            strike_val = ladder[i]
-            if strike_val <= spot:
-                continue
-            entry = by_strike.get(strike_val)
-            if not entry:
-                continue
-            leg = self._strike_leg_candidate(entry, "call", strike_val, for_entry_timing, now)
-            if leg:
-                best_call = leg
-                call_steps = steps_from_atm
-                break
-
-        best_put = None
-        put_steps = None
-        for i in range(atm_idx, -1, -1):
-            steps_from_atm = atm_idx - i
-            if steps_from_atm > max_steps:
-                break
-            strike_val = ladder[i]
-            if strike_val >= spot:
-                continue
-            entry = by_strike.get(strike_val)
-            if not entry:
-                continue
-            leg = self._strike_leg_candidate(entry, "put", strike_val, for_entry_timing, now)
-            if leg:
-                best_put = leg
-                put_steps = steps_from_atm
-                break
-
-        if best_call and best_put:
-            call_secs = self._seconds_to_expiry(best_call["symbol"], now=now)
-            put_secs = self._seconds_to_expiry(best_put["symbol"], now=now)
-            logger.info(
-                f"Strike pick (spot≈{spot:.6f}, ATM≈{ladder[atm_idx]:.6f}, "
-                f"CALL +{call_steps} step(s), PUT -{put_steps} step(s), expiry {call_secs:.0f}s): "
-                f"CALL {best_call['strike']:.6f} @ {best_call['profit_pct']:.1f}% | "
-                f"PUT {best_put['strike']:.6f} @ {best_put['profit_pct']:.1f}%"
-            )
-            return {"call": best_call, "put": best_put}
-
-        if for_entry_timing:
-            with self._price_lock:
-                self._diagnose_expiry_in_feed(prices, now=now)
-            logger.warning(
-                f"No centered straddle within {max_steps} strike steps of ATM "
-                f"(profit {self.min_profit_pct}-{self.max_profit_pct}%, "
-                f"server :{self._server_second():02d})"
-            )
-        else:
-            logger.warning(
-                f"No qualifying centered CALL/PUT pair "
-                f"(profit {self.min_profit_pct}-{self.max_profit_pct}%, "
-                f"server :{self._server_second():02d})"
-            )
-        return None
-
-    @staticmethod
     def _calculate_ema(values, period=15):
         if not values or len(values) < 2:
             return 0.0
@@ -4303,10 +3734,7 @@ class DoubleMartingaleBot:
         Tier advances only after all steps in the current tier lose (never on a win).
         When balance is given and cannot cover the scheduled step, ladder state is
         downgraded first via _apply_balance_ladder_downgrade (called from sync).
-        In CRM mode, returns balance-proportional CRM tier/step amount directly.
         """
-        if getattr(self, 'crm_mode', False) and getattr(self, 'crm_tiers', None):
-            return self._compute_crm_bet()
         if not hasattr(self, 'budget_tiers') or not self.budget_tiers:
             self._apply_standard_budget_tiers()
         bal = balance if balance is not None else self.safe_get_balance()
@@ -4365,8 +3793,6 @@ class DoubleMartingaleBot:
         }
 
     def _validate_bet_amount(self, amount):
-        if getattr(self, 'crm_mode', False):
-            return True
         self._apply_standard_budget_tiers()
         allowed = {float(x) for tier in self.budget_tiers for x in tier}
         if float(amount) not in allowed:
@@ -4574,18 +4000,6 @@ class DoubleMartingaleBot:
         schedule_refresh()
         self._refresh_pair_learning_cache_later()
 
-    def _simulate_round_outcome(self, call_info, put_info):
-        """Simulate straddle: win = not both legs lose; uses configured win rate."""
-        if random.random() >= self.sim_win_rate:
-            return -2.0 * self.current_bet
-        win_leg = random.choice(["call", "put"])
-        payout_pct = (call_info if win_leg == "call" else put_info)["profit_pct"] / 100.0
-        win_profit = self.current_bet * payout_pct
-        lose_cost = self.current_bet
-        return win_profit - lose_cost
-
-    # ── Trade Execution ──────────────────────────────────────────────────────
-
     def _place_trade(self, instrument_id, amount, direction=None, retries=None, skip_validation=False, asset_name=None):
         max_attempts = 1 if retries is None else max(1, int(retries))
         if not skip_validation and not self._validate_bet_amount(amount):
@@ -4752,28 +4166,6 @@ class DoubleMartingaleBot:
             logger.error(f"Error checking async result for {order_id}: {e}", exc_info=True)
             return _TIMEOUT_SENTINEL  # ← FIXED: exception → treat as loss
 
-    def _fetch_both_results_concurrent(self, call_id, put_id, call_info, put_info):
-        """
-        Fetch CALL and PUT results CONCURRENTLY so we wait max ~70s total,
-        not up to 140s sequentially.
-        Returns (call_result, put_result) — each may be _TIMEOUT_SENTINEL.
-        """
-        call_result = _TIMEOUT_SENTINEL
-        put_result = _TIMEOUT_SENTINEL
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            call_future = executor.submit(
-                self._check_trade_result, call_id, call_info
-            )
-            put_future = executor.submit(
-                self._check_trade_result, put_id, put_info
-            )
-            call_result = call_future.result()
-            put_result = put_future.result()
-
-        return call_result, put_result
-
-    @staticmethod
     def _leg_lost(leg_result):
         if leg_result is _TIMEOUT_SENTINEL:
             return True
@@ -4803,15 +4195,6 @@ class DoubleMartingaleBot:
             )
 
         return round_profit, both_lost, timed_out
-
-    def _place_straddle_concurrent(self, call_symbol, put_symbol, amount):
-        """Place CALL and PUT at the same time to reduce unhedged exposure."""
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            call_future = executor.submit(self._place_trade, call_symbol, amount, direction="call")
-            put_future = executor.submit(self._place_trade, put_symbol, amount, direction="put")
-            call_ok, call_id = call_future.result()
-            put_ok, put_id = put_future.result()
-        return call_ok, call_id, put_ok, put_id
 
     def _required_balance_next_round(self, balance=None):
         bet_info = self._compute_round_bet(balance=balance)
@@ -4883,11 +4266,7 @@ class DoubleMartingaleBot:
                 self._resuming_mid_ladder = False
             else:
                 next_step = self.session_round_count + 1
-                if getattr(self, 'crm_mode', False) and getattr(self, 'crm_tiers', None):
-                    _ci = min(self.crm_tier_index, len(self.crm_tiers) - 1)
-                    tier = self.crm_tiers[_ci]
-                else:
-                    tier = self.budget_tiers[self.current_tier_index]
+                tier = self.budget_tiers[self.current_tier_index]
                 self.session_profit += total_profit
                 self.total_profit += total_profit
                 self.session_total_profit += total_profit
@@ -4916,6 +4295,7 @@ class DoubleMartingaleBot:
                     )
 
             self.persist_state("reconciled")
+            self._maybe_sync_balance_after_trade()
 
     def _server_timestamp(self):
         try:
@@ -5000,203 +4380,6 @@ class DoubleMartingaleBot:
                 time.sleep(min(0.25, end_t - time.time()))
 
         self._log_entry_timing("window ready")
-
-    def _seed_sniper_window_extremes(self, ref_spot):
-        """Seed pullback range from live candles so prep-window extremes stay current."""
-        window_high = float(ref_spot)
-        window_low = float(ref_spot)
-        try:
-            candles = self._get_candles_safe(self.asset, app_config.FOLLOW_CANDLE_TIMEFRAME, 30, time.time())
-            if candles:
-                for candle in candles[-30:]:
-                    _, high, low, close = self._candle_ohlc(candle)
-                    for px in (high, low, close):
-                        if px > 0:
-                            window_high = max(window_high, px)
-                            window_low = min(window_low, px)
-                return window_high, window_low
-        except Exception as e:
-            logger.debug(f"Sniper candle seed failed, falling back to tick cache: {e}")
-
-        with self._price_lock:
-            prices = self._price_data.get(60, []) or []
-        if not prices:
-            return window_high, window_low
-        first = prices[0] if prices else {}
-        if "close" not in first and "open" not in first:
-            return window_high, window_low
-        for tick in prices[-30:]:
-            try:
-                px = float(tick.get("close", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if px > 0:
-                window_high = max(window_high, px)
-                window_low = min(window_low, px)
-        return window_high, window_low
-
-    def _sniper_favorable_spot(self, direction, ref_spot, spot, window_high, window_low, threshold):
-        """True when spot is still on the dip/spike side — not after a full recovery."""
-        if direction == "call":
-            return spot <= ref_spot or (window_high - spot) >= threshold * 0.5
-        return spot >= ref_spot or (spot - window_low) >= threshold * 0.5
-
-    def _wait_for_micro_pullback_entry(self, target_dir):
-        """
-        Window sniper: enter on the pullback (CALL dip / PUT spike), not after recovery.
-        Uses live dip detection, first-bounce-after-drop, and skips FOMO if price recovered.
-        Returns (proceed: bool, reason: str).
-        """
-        if not getattr(app_config, "SNIPER_ENTRY_ENABLED", True):
-            return True, "sniper disabled"
-        if self.strategy_mode != "directional_trend":
-            return True, "not directional"
-
-        atr = self._calculate_atr(self.asset, count=5)
-        if atr <= 0:
-            return True, "no atr"
-
-        pullback_mult = float(getattr(app_config, "SNIPER_PULLBACK_ATR", 0.05))
-        threshold = pullback_mult * atr
-        poll = float(getattr(app_config, "SNIPER_POLL_INTERVAL_SEC", 0.1))
-        max_wait = float(getattr(app_config, "SNIPER_MAX_WAIT_SEC", 12.0))
-        fomo_skip_bad = getattr(app_config, "SNIPER_FOMO_SKIP_UNFAVORABLE", True)
-        direction = (target_dir or "call").lower()
-
-        ref_spot = None
-        try:
-            candles = self._get_candles_safe(self.asset, app_config.FOLLOW_CANDLE_TIMEFRAME, 5, time.time())
-            if candles:
-                ref_spot = float(candles[-1].get("close", 0) or 0)
-        except Exception:
-            ref_spot = None
-        if not ref_spot or ref_spot <= 0:
-            with self._price_lock:
-                prices = self._price_data.get(60, [])
-            ref_spot = self._estimate_spot_price(prices)
-        if not ref_spot or ref_spot <= 0:
-            return True, "no spot"
-
-        med_slope, _ = self._calculate_trend_metrics(self.asset, ref_spot, count=15)
-        short_slope, short_er = self._calculate_trend_metrics(self.asset, ref_spot, count=5)
-        if self._sniper_blocked_by_recovery_momentum(
-            direction, med_slope, short_slope, short_er
-        ):
-            logger.warning(
-                f"🎯 Sniper skip — {direction.upper()} conflicts with recovery momentum "
-                f"(med={med_slope:.1f}, short={short_slope:.1f}, ER={short_er:.3f})"
-            )
-            return False, "sniper_recovery_momentum"
-
-        window_high, window_low = self._seed_sniper_window_extremes(ref_spot)
-        prev_spot = ref_spot
-        ticks_against = 0
-        start = time.time()
-        logger.info(
-            f"🎯 Sniper: waiting for {direction.upper()} pullback "
-            f"(ref={ref_spot:.6f}, range {window_low:.6f}–{window_high:.6f}, "
-            f"need {pullback_mult:.2f}×ATR={threshold:.6f}, max {max_wait:.0f}s)"
-        )
-
-        def _fomo_or_skip(reason_tag):
-            with self._price_lock:
-                prices_now = self._price_data.get(60, [])
-            spot_now = self._estimate_spot_price(prices_now)
-            if not spot_now or spot_now <= 0:
-                return True, reason_tag
-            if fomo_skip_bad and not self._sniper_favorable_spot(
-                direction, ref_spot, spot_now, window_high, window_low, threshold
-            ):
-                logger.warning(
-                    f"⏰ Sniper skip — price recovered past ref ({spot_now:.6f} vs "
-                    f"{ref_spot:.6f}); hollow entry avoided"
-                )
-                return False, "fomo_unfavorable"
-            logger.info(
-                f"⏰ Sniper FOMO ({reason_tag}) at {spot_now:.6f} — still favorable"
-            )
-            return True, reason_tag
-
-        # Pullback may have already happened during gate prep — enter before bounce.
-        if direction == "call":
-            dip_now = window_high - ref_spot
-            if dip_now >= threshold:
-                logger.info(
-                    f"📉 Sniper CALL immediate: prep-window dip {dip_now:.6f} "
-                    f"(high {window_high:.6f})"
-                )
-                return True, "pullback_call_immediate"
-        else:
-            rise_now = ref_spot - window_low
-            if rise_now >= threshold:
-                logger.info(
-                    f"📈 Sniper PUT immediate: prep-window spike {rise_now:.6f} "
-                    f"(low {window_low:.6f})"
-                )
-                return True, "pullback_put_immediate"
-
-        self._price_event.clear()
-        while self.running:
-            elapsed = time.time() - start
-            if elapsed >= max_wait:
-                return _fomo_or_skip("fomo_timeout")
-
-            if self.trading_mode != "turbo":
-                if self._too_late_to_place() or self._past_entry_hard_abort():
-                    return _fomo_or_skip("fomo_deadline")
-
-            # Event-driven: wake immediately when a new price tick arrives,
-            # fall back to poll interval as a safety timeout.
-            self._price_event.wait(timeout=poll)
-            self._price_event.clear()
-
-            with self._price_lock:
-                prices = self._price_data.get(60, [])
-            spot = self._estimate_spot_price(prices)
-            if not spot or spot <= 0:
-                continue
-
-            window_high = max(window_high, spot)
-            window_low = min(window_low, spot)
-
-            if direction == "call":
-                dip = window_high - spot
-                if dip >= threshold:
-                    logger.info(
-                        f"📉 Sniper CALL: dip {dip:.6f} from window high "
-                        f"{window_high:.6f} → spot {spot:.6f}"
-                    )
-                    return True, "pullback_call"
-                if spot > prev_spot and ticks_against >= 2:
-                    fall = window_high - prev_spot
-                    if fall >= threshold:
-                        logger.info(
-                            f"📉 Sniper CALL bounce-entry: fell {fall:.6f}, "
-                            f"first uptick at {spot:.6f}"
-                        )
-                        return True, "pullback_call_bounce"
-                ticks_against = ticks_against + 1 if spot < prev_spot else 0
-            else:
-                rise = spot - window_low
-                if rise >= threshold:
-                    logger.info(
-                        f"📈 Sniper PUT: rise {rise:.6f} from window low "
-                        f"{window_low:.6f} → spot {spot:.6f}"
-                    )
-                    return True, "pullback_put"
-                if spot < prev_spot and ticks_against >= 2:
-                    spike = prev_spot - window_low
-                    if spike >= threshold:
-                        logger.info(
-                            f"📈 Sniper PUT bounce-entry: rose {spike:.6f}, "
-                            f"first downtick at {spot:.6f}"
-                        )
-                        return True, "pullback_put_bounce"
-                ticks_against = ticks_against + 1 if spot > prev_spot else 0
-
-            prev_spot = spot
-
-        return False, "stopped"
 
     def _skip_to_next_entry_window(self, reason):
         tier = self.current_tier_index + 1
@@ -5423,8 +4606,6 @@ class DoubleMartingaleBot:
         Risk governor caps max tier from tradable balance and drawdown mode.
         In CRM mode, normal tier sync is bypassed — CRM manages its own ladder.
         """
-        if getattr(self, 'crm_mode', False):
-            return
         if balance is None:
             balance = self.safe_get_balance()
         self._update_budget_tiers_for_balance(balance)
@@ -5505,9 +4686,6 @@ class DoubleMartingaleBot:
         return 2.0 * sum(self.budget_tiers[tier_index])
 
     def _current_tier_step_count(self):
-        if getattr(self, 'crm_mode', False) and getattr(self, 'crm_tiers', None):
-            crm_t_idx = min(self.crm_tier_index, len(self.crm_tiers) - 1)
-            return len(self.crm_tiers[crm_t_idx])
         if not self.budget_tiers or self.current_tier_index >= len(self.budget_tiers):
             return 0
         return len(self.budget_tiers[self.current_tier_index])
@@ -5557,28 +4735,6 @@ class DoubleMartingaleBot:
         - CRM-T2 exhausted → accept total loss, reset cleanly to balance-floor tier.
         Always returns False (no hard stop).
         """
-        # ── CRM mode: advance CRM tier or exit on full exhaustion ────────────────
-        if getattr(self, 'crm_mode', False):
-            next_crm = self.crm_tier_index + 1
-            if next_crm < len(self.crm_tiers):
-                self.crm_tier_index = next_crm
-                self.session_round_count = 0
-                amounts = self.crm_tiers[next_crm]
-                logger.warning(
-                    f"💀 CRM-T{next_crm} exhausted → advancing to "
-                    f"CRM-T{next_crm + 1} [{', '.join(f'${x:.0f}' for x in amounts)}]. "
-                    f"Collected ${self.crm_collected:.2f}/{self.crm_target:.2f}."
-                )
-                self._notify(
-                    "CRM tier advanced",
-                    f"CRM-T{next_crm} all steps lost. "
-                    f"Advancing to CRM-T{next_crm + 1}. "
-                    f"Collected ${self.crm_collected:.2f}/{self.crm_target:.2f}.",
-                )
-            else:
-                self._exit_crm(success=False)
-            return False
-
         # ── Normal mode: sequential 6-tier escalation across 3 rounds ───────────
         # Structure:
         #   Round 1: T0 (main) → T1 (reserve)
@@ -5645,144 +4801,6 @@ class DoubleMartingaleBot:
 
         return False
 
-    def _compute_crm_tiers(self, balance, total_loss):
-        """
-        Compute two balance-proportional Capital Recovery Mode tiers.
-        CRM-T1: ~10-win ladder to recover (total_loss + profit_target).
-        CRM-T2: ~10-win backup ladder to recover (total_loss + CRM-T1 max loss + profit_target).
-        All step amounts are capped as a fraction of current balance to prevent
-        catastrophic single-bet exposure.
-        """
-        profit_target = min(200.0, max(15.0, balance * 0.10))
-
-        def _build_tier(target, balance):
-            s1 = target / (10.0 * 0.85)
-            s2 = (target + s1) / (2.0 * 0.85)
-            s3 = (target + s1 + s2) / 0.85
-            s1 = min(s1, max(5.0,  balance * 0.10))
-            s2 = min(s2, max(12.0, balance * 0.20))
-            s3 = min(s3, max(35.0, balance * 0.35))
-            s2 = max(s2, s1 + 1.0)
-            s3 = max(s3, s2 + 1.0)
-            return [round(s1), round(s2), round(s3)]
-
-        crm_t1 = _build_tier(total_loss + profit_target, balance)
-        crm1_max_loss = sum(crm_t1)
-        crm_t2 = _build_tier(total_loss + crm1_max_loss + profit_target, balance)
-        for i in range(len(crm_t2)):
-            crm_t2[i] = max(crm_t2[i], crm_t1[i] + 1)
-        return [crm_t1, crm_t2]
-
-    def _trigger_crm(self):
-        """Enter Capital Recovery Mode after both active tiers (T0+T1) are exhausted."""
-        balance = self.safe_get_balance()
-        total_active_loss = float(sum(sum(t) for t in self.budget_tiers))
-        profit_target = min(200.0, max(15.0, balance * 0.10))
-        self.crm_mode = True
-        self.crm_tiers = self._compute_crm_tiers(balance, total_active_loss)
-        self.crm_tier_index = 0
-        self.crm_target = total_active_loss + profit_target
-        self.crm_collected = 0.0
-        self.session_round_count = 0
-        t1 = self.crm_tiers[0]
-        t2 = self.crm_tiers[1]
-        logger.warning(
-            f"💰 CRM TRIGGERED: balance=${balance:.2f}, "
-            f"target=${self.crm_target:.2f} "
-            f"(recover ${total_active_loss:.2f} + profit ${profit_target:.2f}). "
-            f"CRM-T1 [{', '.join(f'${x:.0f}' for x in t1)}] | "
-            f"CRM-T2 [{', '.join(f'${x:.0f}' for x in t2)}]"
-        )
-        self._notify(
-            "Capital Recovery Mode activated",
-            f"Active pair (T0+T1) exhausted. CRM target ${self.crm_target:.2f} "
-            f"over ~10 wins. CRM-T1: ${t1[0]:.0f}/${t1[1]:.0f}/${t1[2]:.0f} | "
-            f"CRM-T2: ${t2[0]:.0f}/${t2[1]:.0f}/${t2[2]:.0f}",
-        )
-
-    def _compute_crm_bet(self):
-        """Return a bet breakdown dict for the current CRM tier and step."""
-        crm_tier_idx = min(self.crm_tier_index, len(self.crm_tiers) - 1)
-        tier = self.crm_tiers[crm_tier_idx]
-        step_idx = min(self.session_round_count, len(tier) - 1)
-        amount = float(tier[step_idx])
-        return {
-            "amount": amount,
-            "tier_index": crm_tier_idx,
-            "tier_number": f"CRM-T{crm_tier_idx + 1}",
-            "step_index": step_idx,
-            "step_number": step_idx + 1,
-            "scheduled_tier_index": crm_tier_idx,
-            "scheduled_tier_number": f"CRM-T{crm_tier_idx + 1}",
-            "scheduled_step_index": step_idx,
-            "scheduled_step_number": step_idx + 1,
-            "balance_downgrade": False,
-            "base_amount": amount,
-            "scale": 1.0,
-            "debt_scale_applied": False,
-            "dynamic_scale_applied": False,
-            "scheduled_ladder": [float(x) for x in tier],
-            "exact_ladder_value": True,
-            "play_ladder": [float(x) for x in tier],
-            "crm_mode": True,
-            "crm_tier_index": crm_tier_idx,
-            "crm_target": self.crm_target,
-            "crm_collected": self.crm_collected,
-        }
-
-    def _apply_crm_win(self, net_gain):
-        """
-        Handle a winning round in Capital Recovery Mode.
-        Accumulate net_gain into crm_collected and reset the step to S1.
-        Exit CRM automatically when crm_collected >= crm_target.
-        """
-        self.crm_collected += max(0.0, float(net_gain))
-        self.session_round_count = 0
-        logger.info(
-            f"💰 CRM WIN +${net_gain:.2f} → "
-            f"collected ${self.crm_collected:.2f}/{self.crm_target:.2f} "
-            f"(CRM-T{self.crm_tier_index + 1})"
-        )
-        if self.crm_collected >= self.crm_target:
-            self._exit_crm(success=True)
-
-    def _exit_crm(self, success):
-        """Exit Capital Recovery Mode and return to normal active-pair play."""
-        self.crm_mode = False
-        self._recovery_in_progress = False
-        self.cumulative_debt = 0.0
-        self.session_round_count = 0
-        floor = self._balance_baseline_tier_index()
-        self.assigned_tier_index = floor
-        self.current_tier_index = floor
-        if success:
-            logger.info(
-                f"✅ CRM COMPLETE: recovered target ${self.crm_target:.2f} "
-                f"(collected ${self.crm_collected:.2f}). Resuming T{floor + 1}."
-            )
-            self._notify(
-                "Capital Recovery Mode complete",
-                f"Target ${self.crm_target:.2f} fully recovered "
-                f"(${self.crm_collected:.2f} collected). "
-                f"Resuming normal play at T{floor + 1}.",
-            )
-        else:
-            logger.warning(
-                f"❌ CRM EXHAUSTED: accepting total loss. "
-                f"Collected ${self.crm_collected:.2f}/{self.crm_target:.2f}. "
-                f"Resetting to T{floor + 1}."
-            )
-            self._notify(
-                "Capital Recovery Mode exhausted",
-                f"All CRM tiers lost. "
-                f"Collected ${self.crm_collected:.2f}/{self.crm_target:.2f}. "
-                f"Resetting to T{floor + 1}.",
-            )
-        self.crm_tiers = []
-        self.crm_tier_index = 0
-        self.crm_target = 0.0
-        self.crm_collected = 0.0
-
     def _apply_win_ladder_rules(self):
         """
         Win ladder rules (multi-round 6-tier system with wins-counter recovery):
@@ -5806,10 +4824,6 @@ class DoubleMartingaleBot:
         Main tier wins (T0/T2/T4):
           Reset to S1 of the same tier.  No counter change.
         """
-        if getattr(self, 'crm_mode', False):
-            self._apply_crm_win(self.session_profit)
-            return
-
         if getattr(self, 'sequential_steps_mode', False):
             tier = self.budget_tiers[self.current_tier_index]
             next_step = (self.session_round_count + 1) % len(tier)
@@ -6030,49 +5044,24 @@ class DoubleMartingaleBot:
         else:
             logger.warning(f"Unknown finalize reason: {reason}")
 
-        if not reason.startswith("Round Won") and not getattr(self, 'crm_mode', False):
+        if not reason.startswith("Round Won"):
             self._return_to_tier_one_step_one_if_debt_cleared()
         self.session_profit = 0.0
         self._sync_ladder_indices()
         self._last_ladder_prep_key = None
 
-        # Loud state summary after every finalize
-        if getattr(self, 'crm_mode', False) and getattr(self, 'crm_tiers', None):
-            crm_t = self.crm_tiers[min(self.crm_tier_index, len(self.crm_tiers) - 1)]
-            crm_s = min(self.session_round_count, len(crm_t) - 1)
-            logger.info(
-                f"📊 CRM STATE: CRM-T{self.crm_tier_index + 1} "
-                f"step {crm_s + 1}/{len(crm_t)} "
-                f"(${float(crm_t[crm_s]):.0f}) "
-                f"| Collected: ${self.crm_collected:.2f}/{self.crm_target:.2f} "
-                f"| Ladder: {[float(x) for x in crm_t]}"
-            )
-        else:
-            tier = self.budget_tiers[self.current_tier_index]
-            logger.info(
-                f"📊 STATE: Tier {self.current_tier_index + 1} "
-                f"step {self.session_round_count + 1}/{len(tier)} "
-                f"(${float(tier[min(self.session_round_count, len(tier)-1)]):.0f}) "
-                f"| Debt: ${self.cumulative_debt:.2f} "
-                f"| Ladder: {[float(x) for x in tier]}"
-            )
+        tier = self.budget_tiers[self.current_tier_index]
+        logger.info(
+            f"📊 STATE: Tier {self.current_tier_index + 1} "
+            f"step {self.session_round_count + 1}/{len(tier)} "
+            f"(${float(tier[min(self.session_round_count, len(tier)-1)]):.0f}) "
+            f"| Debt: ${self.cumulative_debt:.2f} "
+            f"| Ladder: {[float(x) for x in tier]}"
+        )
         self.persist_state(reason)
 
         if hard_stop:
             self.running = False
-            
-        if self.ai_assessor:
-            try:
-                from trade_log import read_trades
-
-                min_trades = getattr(app_config, "AI_MIN_TRADES_FOR_OPTIMIZATION", 50)
-                trade_count = len(
-                    read_trades(limit=500, account_key=self._state_account_key())
-                )
-                if trade_count >= min_trades:
-                    self.run_ai_agent_pipeline()
-            except Exception as e:
-                logger.debug(f"AI optimization pipeline skipped: {e}")
 
     # ── Main Loop ────────────────────────────────────────────────────────────
 
@@ -6194,6 +5183,7 @@ class DoubleMartingaleBot:
                             break
                         continue
 
+                    self._maybe_sync_balance_idle()
                     self._maybe_roll_evaluation_window()
                     if self._is_tier_exhaustion_cooldown_active():
                         self._wait_for_tier_exhaustion_cooldown()
@@ -6277,11 +5267,6 @@ class DoubleMartingaleBot:
                     self.current_tier_index = tier_idx
                     current_tier = self.budget_tiers[tier_idx]
                     self.session_max_rounds = len(current_tier)
-
-                    # ── Multi-asset simultaneous trading branch ───────────────
-                    if self.multi_asset_mode:
-                        self._run_multi_asset_cycle()
-                        continue
 
                     if not self._trading_bootstrapped:
                         self._trading_bootstrapped = True
@@ -6519,21 +5504,9 @@ class DoubleMartingaleBot:
                     score_reason = "Bypassed for strict candle follow"
 
                     self._pending_entry_quality = entry_quality
-                    _eval_dir = (
-                        target_dir
-                        if self.strategy_mode == "directional_trend"
-                        else "straddle"
-                    )
-                    _eval_leg = (
-                        leg_info
-                        if self.strategy_mode == "directional_trend"
-                        else (call_info or put_info)
-                    )
-
                     self._pending_trade_context = self._build_trade_evaluation_context(
-                        _eval_dir, _eval_leg, entry_quality
+                        target_dir, leg_info, entry_quality
                     )
-                    self._pending_trade_context["sniper_result"] = "disabled"
 
                     self._log_entry_timing("pre-placement")
                     self._capture_entry_snapshot_at_placement()
@@ -6550,28 +5523,18 @@ class DoubleMartingaleBot:
                     try:
                         self._log_entry_timing("send order")
                         bd = self.last_bet_breakdown or {}
-                        if self.strategy_mode == "directional_trend":
-                            logger.info(
-                                f"LADDER ORDER — Tier {bd.get('tier_number', '?')} "
-                                f"step {bd.get('step_number', '?')}: "
-                                f"Placing single {target_dir.upper()} ${self.current_bet:.2f}..."
-                            )
-                            ok, order_id = self._place_trade(leg_info["symbol"], self.current_bet, direction=target_dir)
-                            call_ok, call_id = (ok, order_id) if target_dir == "call" else (False, None)
-                            put_ok, put_id = (ok, order_id) if target_dir == "put" else (False, None)
-                        else:
-                            logger.info(
-                                f"LADDER ORDER — Tier {bd.get('tier_number', '?')} "
-                                f"step {bd.get('step_number', '?')}: "
-                                f"Placing CALL+PUT ${self.current_bet:.2f} each (concurrent)..."
-                            )
-                            call_ok, call_id, put_ok, put_id = self._place_straddle_concurrent(
-                                call_info["symbol"],
-                                put_info["symbol"],
-                                self.current_bet,
-                            )
                         logger.info(
-                            f"Trade placement complete: CALL={call_ok}, PUT={put_ok}"
+                            f"LADDER ORDER — Tier {bd.get('tier_number', '?')} "
+                            f"step {bd.get('step_number', '?')}: "
+                            f"Placing single {target_dir.upper()} ${self.current_bet:.2f}..."
+                        )
+                        ok, order_id = self._place_trade(
+                            leg_info["symbol"], self.current_bet, direction=target_dir
+                        )
+                        call_ok, call_id = (ok, order_id) if target_dir == "call" else (False, None)
+                        put_ok, put_id = (ok, order_id) if target_dir == "put" else (False, None)
+                        logger.info(
+                            f"Trade placement complete: {target_dir.upper()}={call_ok or put_ok}"
                         )
 
                         self._inflight_trade_ids = []
@@ -6579,7 +5542,7 @@ class DoubleMartingaleBot:
                             self._inflight_trade_ids.append(int(call_id))
                         if put_ok and put_id:
                             self._inflight_trade_ids.append(int(put_id))
-                        if (self.strategy_mode == "directional_trend" and (call_ok or put_ok)) or (call_ok and put_ok):
+                        if call_ok or put_ok:
                             self._pair_filter_skip_streak[self.asset] = 0
                         self.persist_state("trades placed")
                     finally:
@@ -6606,100 +5569,49 @@ class DoubleMartingaleBot:
                         self._skip_to_next_entry_window("legs rejected")
                         continue
 
-                    if self.strategy_mode != "directional_trend" and not (call_ok and put_ok):
-                        partial_profit = 0.0
-                        if call_ok and call_id:
-                            res = self._check_trade_result(call_id, call_info=call_info)
-                            partial_profit += (
-                                -self.current_bet if res is _TIMEOUT_SENTINEL else res
-                            )
-                        if put_ok and put_id:
-                            res = self._check_trade_result(put_id, put_info=put_info)
-                            partial_profit += (
-                                -self.current_bet if res is _TIMEOUT_SENTINEL else res
-                            )
-                        self.total_profit += partial_profit
-                        self.session_total_profit += partial_profit
-                        if partial_profit < 0:
-                            self.cumulative_debt += abs(partial_profit)
-                        elif partial_profit > 0:
-                            self.cumulative_debt = max(0.0, self.cumulative_debt - partial_profit)
-                        self._return_to_tier_one_step_one_if_debt_cleared()
-                        logger.warning(
-                            f"Partial fill (CALL={call_ok}, PUT={put_ok}). "
-                            f"P/L ${partial_profit:.2f} — ladder NOT advanced."
-                        )
-                        self._notify(
-                            "Partial fill",
-                            f"{self.asset}: only one leg opened. Ladder held.",
-                        )
-                        self._log_trade_round(
-                            partial_profit, call_info, put_info, partial=True, both_legs=False
-                        )
-                        self.persist_state("partial fill")
-                        if not self._interruptible_sleep(10):
-                            break
-                        continue
-
                     self.round_number += 1
-                    logger.info(f"Orders placed! CALL={call_id} | PUT={put_id}")
+                    logger.info(f"Order placed: {call_id or put_id}")
                     logger.info("Waiting for expiry...")
 
                     if self.simulation_mode:
-                        if self.strategy_mode == "directional_trend":
-                            # Simulate directional outcome: simple win rate win/loss
-                            # Note: simulation resolves multiple in-flight trades if a pullback was placed
-                            round_profit = 0.0
-                            both_lost = True
-                            for _ in self._inflight_trade_ids:
-                                if random.random() >= self.sim_win_rate:
-                                    round_profit -= self.current_bet
-                                else:
-                                    payout_pct = leg_info["profit_pct"] / 100.0
-                                    round_profit += self.current_bet * payout_pct
-                                    both_lost = False
-                        else:
-                            round_profit = self._simulate_round_outcome(call_info, put_info)
-                            both_lost = round_profit < 0
+                        round_profit = 0.0
+                        both_lost = True
+                        for _ in self._inflight_trade_ids:
+                            if random.random() >= self.sim_win_rate:
+                                round_profit -= self.current_bet
+                            else:
+                                payout_pct = leg_info["profit_pct"] / 100.0
+                                round_profit += self.current_bet * payout_pct
+                                both_lost = False
                         logger.info(f"SIM round P/L: ${round_profit:.2f}")
                     else:
-                        if self.strategy_mode == "directional_trend":
-                            # Resolve all in-flight orders for this round concurrently
-                            resolved_profits = []
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._inflight_trade_ids)) as executor:
-                                futures = {executor.submit(self._check_trade_result, oid, call_info=call_info, put_info=put_info): oid for oid in self._inflight_trade_ids}
-                                for fut in concurrent.futures.as_completed(futures):
-                                    res = fut.result()
-                                    resolved_profits.append(res)
-                            
-                            round_profit = 0.0
+                        resolved_profits = []
+                        with concurrent.futures.ThreadPoolExecutor(
+                            max_workers=max(1, len(self._inflight_trade_ids))
+                        ) as executor:
+                            futures = {
+                                executor.submit(
+                                    self._check_trade_result,
+                                    oid,
+                                    call_info=leg_info,
+                                    put_info=leg_info,
+                                ): oid
+                                for oid in self._inflight_trade_ids
+                            }
+                            for fut in concurrent.futures.as_completed(futures):
+                                resolved_profits.append(fut.result())
+
+                        round_profit = 0.0
+                        both_lost = True
+                        for res in resolved_profits:
+                            if res is _TIMEOUT_SENTINEL:
+                                round_profit -= self.current_bet
+                            else:
+                                round_profit += res
+                                if res > 0:
+                                    both_lost = False
+                        if round_profit <= 0:
                             both_lost = True
-                            for res in resolved_profits:
-                                if res is _TIMEOUT_SENTINEL:
-                                    round_profit -= self.current_bet
-                                else:
-                                    round_profit += res
-                                    if res > 0:
-                                        both_lost = False
-                            
-                            # In directional mode with pullbacks, a net loss must be treated as a loss to escalate
-                            if round_profit <= 0:
-                                both_lost = True
-                        else:
-                            call_result, put_result = self._fetch_both_results_concurrent(
-                                call_id, put_id, call_info, put_info
-                            )
-
-                            logger.info(
-                                f"CALL result: ${'timeout' if call_result is _TIMEOUT_SENTINEL else f'{float(call_result):.2f}'}"
-                            )
-                            logger.info(
-                                f"PUT  result: ${'timeout' if put_result is _TIMEOUT_SENTINEL else f'{float(put_result):.2f}'}"
-                            )
-
-                            round_profit, both_lost, timed_out = self._resolve_round_outcome(
-                                call_result, put_result
-                            )
 
                     self.total_profit += round_profit
                     self.session_profit += round_profit
@@ -6747,7 +5659,7 @@ class DoubleMartingaleBot:
                     self._log_trade_round(
                         round_profit, call_info, put_info, partial=False, both_legs=(self.strategy_mode != "directional_trend")
                     )
-                    self._refresh_balance_cache(allow_blocking=True)
+                    self._maybe_sync_balance_after_trade()
                     logger.info(f"Balance: ${self.safe_get_balance():.2f}")
 
                     if not both_lost:
@@ -6763,16 +5675,8 @@ class DoubleMartingaleBot:
                         steps_consumed = 1
                             
                         next_step = self.session_round_count + steps_consumed
-                        if getattr(self, 'crm_mode', False) and getattr(self, 'crm_tiers', None):
-                            _ci = min(self.crm_tier_index, len(self.crm_tiers) - 1)
-                            tier = self.crm_tiers[_ci]
-                        else:
-                            tier = self.budget_tiers[self.current_tier_index]
-                        _tier_label = (
-                            f"CRM-T{self.crm_tier_index + 1}"
-                            if getattr(self, 'crm_mode', False)
-                            else f"Tier {self.current_tier_index + 1}"
-                        )
+                        tier = self.budget_tiers[self.current_tier_index]
+                        _tier_label = f"Tier {self.current_tier_index + 1}"
                         logger.warning(
                             f"ROUND LOST ({_tier_label} "
                             f"step {self.session_round_count + 1}). "
@@ -6962,7 +5866,6 @@ class DoubleMartingaleBot:
             "is_mopup_phase": (
                 self.current_tier_index in (2, 4)
                 and self.cumulative_debt > 0
-                and not getattr(self, "crm_mode", False)
             ),
             "mopup_initial_debt": float(getattr(self, "mopup_initial_debt", 0.0)),
             "mopup_tier": (
@@ -6992,11 +5895,6 @@ class DoubleMartingaleBot:
             ),
             "window_had_tier_exhaustion": getattr(self, "window_had_tier_exhaustion", False),
             "budget_tiers": self.budget_tiers if hasattr(self, 'budget_tiers') and self.budget_tiers else STANDARD_BUDGET_TIERS,
-            "crm_mode": getattr(self, "crm_mode", False),
-            "crm_tier_index": getattr(self, "crm_tier_index", 0),
-            "crm_target": getattr(self, "crm_target", 0.0),
-            "crm_collected": getattr(self, "crm_collected", 0.0),
-            "crm_tiers": getattr(self, "crm_tiers", []),
             "reserve_wins_needed": getattr(self, "reserve_wins_needed", 0),
             "active_round": self.current_tier_index // 2 + 1,
             "is_reserve_tier": self.current_tier_index in ROUND_RESERVE_TIERS,
@@ -7173,8 +6071,6 @@ class DoubleMartingaleBot:
             self.max_seconds_to_expiry = int(new_config["max_seconds_to_expiry"])
         if "sim_win_rate" in new_config:
             self.sim_win_rate = new_config["sim_win_rate"]
-        if "ai_shadow_mode" in new_config:
-            self.ai_shadow_mode = bool(new_config["ai_shadow_mode"])
         if "blocked_hours" in new_config:
             if isinstance(new_config["blocked_hours"], list):
                 self.blocked_hours = [int(h) for h in new_config["blocked_hours"] if str(h).isdigit()]
@@ -7224,46 +6120,7 @@ class DoubleMartingaleBot:
         if "rule_gate_misaligned_min_bot_conf" in new_config:
             self.rule_gate_misaligned_min_bot_conf = float(new_config["rule_gate_misaligned_min_bot_conf"])
         if "gemini_api_keys" in new_config or "ai_enabled" in new_config:
-            raw_keys = new_config.get("gemini_api_keys", None)
-            ai_on = bool(new_config.get("ai_enabled", True))
-            # Persist to data/ai_settings.json so keys survive restarts
-            try:
-                import json as _json_ai
-                _ai_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    "..", "..", "data", "ai_settings.json"
-                )
-                os.makedirs(os.path.dirname(_ai_path), exist_ok=True)
-                _existing_ai = {}
-                if os.path.exists(_ai_path):
-                    with open(_ai_path, "r", encoding="utf-8") as _fai:
-                        _existing_ai = _json_ai.load(_fai)
-                if raw_keys is not None:
-                    _existing_ai["gemini_api_keys"] = raw_keys
-                _existing_ai["ai_enabled"] = ai_on
-                with open(_ai_path, "w", encoding="utf-8") as _fai:
-                    _json_ai.dump(_existing_ai, _fai)
-            except Exception as _eai:
-                logger.warning(f"Could not persist AI settings: {_eai}")
-            # Update in-memory config so a restart reads the right values
-            keys_to_use = raw_keys if raw_keys is not None else getattr(app_config, "GEMINI_API_KEYS", "")
-            app_config.GEMINI_API_KEYS = keys_to_use
-            app_config.AI_ASSESSMENT_ENABLED = ai_on
-            # Reinitialize (or tear down) the assessor live
-            if ai_on and keys_to_use:
-                self.ai_assessor = AITradeAssessor(
-                    api_keys=keys_to_use,
-                    timeout=app_config.AI_TIMEOUT_SECONDS,
-                    key_cooldown=app_config.AI_KEY_COOLDOWN_SECONDS,
-                    max_calls_per_minute=getattr(app_config, "AI_MAX_CALLS_PER_MINUTE_PER_KEY", 4),
-                    live_model=getattr(app_config, "AI_LIVE_MODEL", "gemini-2.5-flash"),
-                )
-                self.ai_error_msg = ""
-                self._ai_fail_count = 0
-                logger.info("🤖 AI Assessor (re)initialized live from dashboard")
-            else:
-                self.ai_assessor = None
-                logger.info("🤖 AI Assessor disabled via dashboard")
+            logger.info("AI settings ignored — AI assessment removed from this build")
         # Re-clamp tier/step indices so any mid-session config change (e.g.
         # shorter budget_tiers list) never leaves current_tier_index out of bounds.
         self._sync_ladder_indices()

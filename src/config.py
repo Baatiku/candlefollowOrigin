@@ -14,9 +14,6 @@ RANGING_LOOKBACK_CANDLES = 6   # How many candles to look back for ranging filte
 RANGING_MAX_ALTERNATIONS = 3   # Max color changes allowed in the lookback window
 RANGING_MIN_ADX = float(os.getenv("RANGING_MIN_ADX", "20.0"))
 
-SNIPER_ENTRY_ENABLED = False
-
-
 if not IQ_EMAIL or not IQ_PASSWORD:
     import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -41,40 +38,11 @@ HIGH_TIER_MAX_RECOVERY_WINS = int(os.getenv("HIGH_TIER_MAX_RECOVERY_WINS", "2"))
 MIN_PROFIT_PCT = float(os.getenv("MIN_PROFIT_PCT", "145"))
 MAX_PROFIT_PCT = float(os.getenv("MAX_PROFIT_PCT", "277.5"))
 
-# AI Assessment
-GEMINI_API_KEYS = os.getenv("GEMINI_API_KEYS", "")
-AI_ASSESSMENT_ENABLED = os.getenv("AI_ASSESSMENT_ENABLED", "false").lower() == "true"
+# Periodic live balance sync — keeps tier brackets aligned with IQ Option balance.
+BALANCE_REFRESH_EVERY_N_TRADES = int(os.getenv("BALANCE_REFRESH_EVERY_N_TRADES", "3"))
+BALANCE_REFRESH_MIN_HOURS = float(os.getenv("BALANCE_REFRESH_MIN_HOURS", "2"))
 
-# If no keys/enable flag came from env vars, try loading from the persisted
-# dashboard settings file (written when the user saves keys via the UI).
-_AI_SETTINGS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "data", "ai_settings.json"
-)
-if not GEMINI_API_KEYS:
-    try:
-        import json as _json_cfg
-        with open(_AI_SETTINGS_PATH, "r", encoding="utf-8") as _f_cfg:
-            _ai_cfg = _json_cfg.load(_f_cfg)
-            GEMINI_API_KEYS = _ai_cfg.get("gemini_api_keys", "")
-            if not AI_ASSESSMENT_ENABLED:
-                AI_ASSESSMENT_ENABLED = bool(_ai_cfg.get("ai_enabled", False))
-    except Exception:
-        pass
-AI_SHADOW_MODE = os.getenv("AI_SHADOW_MODE", "false").lower() == "true"
-AI_ENSEMBLE_ENABLED = os.getenv("AI_ENSEMBLE_ENABLED", "false").lower() == "true"
-AI_MIN_TIER = int(os.getenv("AI_MIN_TIER", "0"))
-AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "3.0"))
-AI_KEY_COOLDOWN_SECONDS = int(os.getenv("AI_KEY_COOLDOWN_SECONDS", "60"))
-AI_MAX_CALLS_PER_MINUTE_PER_KEY = int(os.getenv("AI_MAX_CALLS_PER_MINUTE_PER_KEY", "4"))
-AI_LIVE_MODEL = os.getenv("AI_LIVE_MODEL", "gemini-2.5-flash")
-AI_MIN_TRADES_FOR_OPTIMIZATION = int(os.getenv("AI_MIN_TRADES_FOR_OPTIMIZATION", "50"))
-AI_SKIP_BOT_CONFIDENCE = float(os.getenv("AI_SKIP_BOT_CONFIDENCE", "0.78"))
-AI_SKIP_MIN_STRADDLE_SCORE = float(os.getenv("AI_SKIP_MIN_STRADDLE_SCORE", "115"))
-AI_SKIP_MIN_ER = float(os.getenv("AI_SKIP_MIN_ER", "0.55"))
-AI_ENSEMBLE_MIN_COMBINED_CONFIDENCE = float(os.getenv("AI_ENSEMBLE_MIN_COMBINED_CONFIDENCE", "0.55"))
-AI_ENSEMBLE_AI_UNAVAILABLE_THRESHOLD = float(os.getenv("AI_ENSEMBLE_AI_UNAVAILABLE_THRESHOLD", "0.50"))
-
-# Rule-based entry gates
+# Rule-based entry gates (logging / learned-pattern display; candle follow bypasses live gates)
 RULE_GATE_ENABLED = os.getenv("RULE_GATE_ENABLED", "true").lower() == "true"
 RULE_GATE_SLOPE_OVERRIDE_MIN_BOT_CONF = float(os.getenv("RULE_GATE_SLOPE_OVERRIDE_MIN_BOT_CONF", "0.70"))
 RULE_GATE_SLOPE_FLIP_CALL_MIN_ER = float(os.getenv("RULE_GATE_SLOPE_FLIP_CALL_MIN_ER", "0.38"))
@@ -114,15 +82,6 @@ MIN_ALIGNED_SIGNALS_STEP3     = int(  os.getenv("MIN_ALIGNED_SIGNALS_STEP3",  "2
 MIN_RECENT_WIN_RATE_STEP3     = float(os.getenv("MIN_RECENT_WIN_RATE_STEP3",  "0.25"))  # asset win-rate floor at step 3+
 MIN_RECENT_TRADES_FOR_RATE    = int(  os.getenv("MIN_RECENT_TRADES_FOR_RATE", "4"))     # min trades before win-rate is used
 PAIR_RECENT_RESULT_WINDOW     = int(  os.getenv("PAIR_RECENT_RESULT_WINDOW",  "6"))     # rolling window size for per-asset results
-
-# Micro-pullback sniper (disabled — strict candle follow fires at entry window)
-SNIPER_ENTRY_ENABLED = os.getenv("SNIPER_ENTRY_ENABLED", "false").lower() == "true"
-SNIPER_PULLBACK_ATR = float(os.getenv("SNIPER_PULLBACK_ATR", "0.05"))
-SNIPER_MAX_WAIT_SEC = float(os.getenv("SNIPER_MAX_WAIT_SEC", "12"))
-SNIPER_POLL_INTERVAL_SEC = float(os.getenv("SNIPER_POLL_INTERVAL_SEC", "0.1"))
-# If price moves against the target direction during the sniper pullback wait,
-# skip the trade entirely rather than chasing a market already moving against us.
-SNIPER_FOMO_SKIP_UNFAVORABLE = os.getenv("SNIPER_FOMO_SKIP_UNFAVORABLE", "true").lower() == "true"
 
 # IQ Option Statistics
 USE_TRADER_MOOD = os.getenv("USE_TRADER_MOOD", "true").lower() == "true"
@@ -258,26 +217,6 @@ TIER_CEILING_THRESHOLDS = [
 # 06:00-06:59 UTC = 7:00–7:59 AM Lagos: historically weak (36% WR); hard-banned from 7am Lagos sharp.
 _default_utc_bans = os.getenv("UTC_BAN_WINDOWS", "")
 UTC_BAN_WINDOWS = [w.strip() for w in _default_utc_bans.split(",") if w.strip()]
-
-# ── Multi-asset simultaneous trading ──────────────────────────────────────────
-# When enabled, the bot picks top N uncorrelated assets each minute and fires
-# all trades simultaneously within the same entry window (:20–:35).
-MULTI_ASSET_MODE = os.getenv("MULTI_ASSET_MODE", "false").lower() == "true"
-# How many assets to trade at once (2 recommended at <$500 balance, 3 at $500+)
-MULTI_ASSET_COUNT = int(os.getenv("MULTI_ASSET_COUNT", "2"))
-# Bet-size scale factors per rank (rank 1 = best signal gets full amount).
-# Default: rank-1 → 100%, rank-2 → 60%, rank-3 → 40% of the sequential step amount.
-MULTI_ASSET_SCALE_FACTORS = [
-    float(x) for x in os.getenv("MULTI_ASSET_SCALE_FACTORS", "1.0,0.6,0.4").split(",")
-]
-# Minimum straddle score for a secondary/tertiary asset to qualify.
-MULTI_ASSET_MIN_SCORE = float(os.getenv("MULTI_ASSET_MIN_SCORE", "55.0"))
-# Consecutive losses on a single asset before that asset's tier escalates.
-MULTI_ASSET_TIER_ESCALATE_LOSSES = int(os.getenv("MULTI_ASSET_TIER_ESCALATE_LOSSES", "3"))
-# Total session P/L across ALL assets that triggers the global hard stop.
-MULTI_ASSET_GLOBAL_STOP_LOSS = float(os.getenv("MULTI_ASSET_GLOBAL_STOP_LOSS", "-150.0"))
-# Pause duration (seconds) after the global hard stop fires before resuming.
-MULTI_ASSET_GLOBAL_PAUSE_SEC = int(os.getenv("MULTI_ASSET_GLOBAL_PAUSE_SEC", "900"))
 
 # UTC-based soft ban: these specific assets are blocked during UTC_SOFT_BAN_WINDOWS
 _default_soft_ban_assets = os.getenv("UTC_SOFT_BAN_ASSETS", "AMAZON,AMAZON-OTC,APPLE,APPLE-OTC")

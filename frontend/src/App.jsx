@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Power, Activity, DollarSign, RotateCcw, Brain, Download } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Power, Activity, DollarSign, RotateCcw, Download } from 'lucide-react';
 
 const API_URL = '/api';
 const FETCH_TIMEOUT_MS = 4000;
@@ -77,40 +77,14 @@ function App() {
   const [clearLogOnReset, setClearLogOnReset] = useState(true);
   const [trades, setTrades] = useState([]);
   const [assetList, setAssetList] = useState([]);
-  const [saveMessage, setSaveMessage] = useState('');
-  const [aiKeyInput, setAiKeyInput] = useState('');
-  const [aiKeyVisible, setAiKeyVisible] = useState(false);
-  const [aiSaveMsg, setAiSaveMsg] = useState('');
-  const [backtest, setBacktest] = useState(null);
-  const [backtestLoading, setBacktestLoading] = useState(false);
-  const [learnLoading, setLearnLoading] = useState(false);
   const [editTiers, setEditTiers] = useState(null);
   const [editAutoBracket, setEditAutoBracket] = useState(true);
   const [tierSaveMsg, setTierSaveMsg] = useState('');
   const [balanceTierBrackets, setBalanceTierBrackets] = useState([]);
-  const [aiComparison, setAiComparison] = useState(null);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [optLogs, setOptLogs] = useState(null);
-  const [optLoading, setOptLoading] = useState(false);
-  const [evalLogs, setEvalLogs] = useState(null);
-  const [todAnalytics, setTodAnalytics] = useState(null);
-  const [todLoading, setTodLoading] = useState(false);
   const [isRefreshingBalance, setIsRefreshingBalance] = useState(false);
-  const [heatmap, setHeatmap] = useState(null);
-  const [gateLog, setGateLog] = useState([]);
-  const [assetBreakdown, setAssetBreakdown] = useState(null);
   const [expandedTradeIndex, setExpandedTradeIndex] = useState(null);
-  const [sequentialAmountsInput, setSequentialAmountsInput] = useState('');
-  const [dailyPnl, setDailyPnl] = useState(null);
-  const [schedule, setSchedule] = useState(null);
-  const [newWinStart, setNewWinStart] = useState('08:00');
-  const [newWinEnd, setNewWinEnd] = useState('12:00');
-  const [scheduleSaving, setScheduleSaving] = useState(false);
   const prevRunningRef = useRef(null);
 
-  const [newTokenDays, setNewTokenDays] = useState(30);
-  const [newTokenKey, setNewTokenKey] = useState('');
-  const [copiedToken, setCopiedToken] = useState('');
 
   const [setupStatus, setSetupStatus] = useState(null);
   const [showSetupWizard, setShowSetupWizard] = useState(false);
@@ -249,279 +223,6 @@ function App() {
   };
 
 
-  const createToken = async () => {
-    setAdminError(''); setAdminSuccess('');
-    try {
-      const res = await apiFetch('/admin/tokens', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration_days: Number(newTokenDays), token_key: newTokenKey.trim() }),
-      }, 8000);
-      const data = await res.json();
-      if (!res.ok) { setAdminError(data.detail || 'Failed to create token'); return; }
-      setAdminSuccess(`Created: ${data.token_key}`);
-      setNewTokenKey('');
-      await loadAdminData();
-    } catch (err) {
-      setAdminError('Failed to create token');
-    }
-  };
-
-  const revokeToken = async (key) => {
-    setAdminError(''); setAdminSuccess('');
-    try {
-      const res = await apiFetch(`/admin/tokens/${encodeURIComponent(key)}/revoke`, { method: 'POST' }, 8000);
-      const data = await res.json();
-      if (!res.ok) { setAdminError(data.detail || 'Revoke failed'); return; }
-      setAdminSuccess(`Revoked: ${key}`);
-      await loadAdminData();
-    } catch (err) {
-      setAdminError('Revoke failed');
-    }
-  };
-
-  const unrevokeToken = async (key) => {
-    setAdminError(''); setAdminSuccess('');
-    try {
-      const res = await apiFetch(`/admin/tokens/${encodeURIComponent(key)}/unrevoke`, { method: 'POST' }, 8000);
-      const data = await res.json();
-      if (!res.ok) { setAdminError(data.detail || 'Unrevoke failed'); return; }
-      setAdminSuccess(`Restored: ${key}`);
-      await loadAdminData();
-    } catch (err) {
-      setAdminError('Unrevoke failed');
-    }
-  };
-
-  const deleteToken = async (key) => {
-    if (!window.confirm(`Delete token ${key}? This cannot be undone.`)) return;
-    setAdminError(''); setAdminSuccess('');
-    try {
-      const res = await apiFetch(`/admin/tokens/${encodeURIComponent(key)}`, { method: 'DELETE' }, 8000);
-      const data = await res.json();
-      if (!res.ok) { setAdminError(data.detail || 'Delete failed'); return; }
-      setAdminSuccess(`Deleted: ${key}`);
-      await loadAdminData();
-    } catch (err) {
-      setAdminError('Delete failed');
-    }
-  };
-
-  const copyToken = (key) => {
-    navigator.clipboard.writeText(key).then(() => {
-      setCopiedToken(key);
-      setTimeout(() => setCopiedToken(''), 2000);
-    }).catch(() => {});
-  };
-
-  const forcePairLearningRefresh = async () => {
-    setLearnLoading(true);
-    try {
-      await apiFetch('/learn-pattern', { method: 'POST' }, 15000);
-      await refreshStatus();
-    } catch (err) {
-      console.error('pair learning refresh:', err);
-    } finally {
-      setLearnLoading(false);
-    }
-  };
-
-
-  const fetchAiComparison = useCallback(async () => {
-    try {
-      setAiLoading(true);
-      const res = await fetch('/api/ai-comparison');
-      const data = await res.json();
-      setAiComparison(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setAiLoading(false);
-    }
-  }, []);
-
-  const fetchTodAnalytics = useCallback(async () => {
-    try {
-      setTodLoading(true);
-      const res = await fetch('/api/trade-history-analytics');
-      const data = await res.json();
-      if (!data || !data.trades) {
-        setTodAnalytics(null);
-        return;
-      }
-      const trades = data.trades;
-      // Group by local hour
-      const hourlyStats = Array.from({ length: 24 }, (_, i) => ({ hour: i, trades: 0, wins: 0, losses: 0, pnl: 0 }));
-      
-      trades.forEach(t => {
-        if (!t.entry_ts) return;
-        const d = new Date(Number(t.entry_ts) * 1000);
-        const hr = d.getHours(); // Local timezone hour
-        if (isNaN(hr)) return;
-
-        const profit = Number(t.round_profit || 0);
-        const isWin = profit > 0;
-        
-        hourlyStats[hr].trades += 1;
-        hourlyStats[hr].pnl += profit;
-        if (isWin) hourlyStats[hr].wins += 1;
-        else hourlyStats[hr].losses += 1;
-      });
-
-      // Calculate win rates and sort
-      hourlyStats.forEach(st => {
-        st.winRate = st.trades > 0 ? (st.wins / st.trades) * 100 : 0;
-      });
-      
-      setTodAnalytics({
-        totalAnalyzed: trades.length,
-        hours: hourlyStats
-      });
-    } catch (err) {
-      console.error("Failed to load TOD analytics", err);
-    } finally {
-      setTodLoading(false);
-    }
-  }, []);
-
-  const loadOptLogs = useCallback(async () => {
-    try {
-      const res = await fetch('/api/ai-optimization-logs');
-      if (!res.ok) return;
-      const data = await res.json();
-      setOptLogs(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error("Failed to load AI Opt logs", err);
-    }
-  }, []);
-
-  const loadEvalLogs = useCallback(async () => {
-    try {
-      const res = await fetch('/api/ai-evaluator-logs');
-      if (!res.ok) return;
-      const data = await res.json();
-      setEvalLogs(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error("Failed to load AI Eval logs", err);
-    }
-  }, []);
-
-  const triggerOptimization = async () => {
-    try {
-      setOptLoading(true);
-      await fetch('/api/trigger-optimization', { method: 'POST' });
-      // Poll a few times to see if log updates
-      setTimeout(() => { loadOptLogs(); loadEvalLogs(); }, 5000);
-      setTimeout(() => { loadOptLogs(); loadEvalLogs(); }, 10000);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setOptLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (status?.connected) {
-      loadOptLogs();
-      loadEvalLogs();
-      fetchTodAnalytics();
-    }
-  }, [status?.connected, loadOptLogs, loadEvalLogs, fetchTodAnalytics]);
-
-  const fetchHeatmap = useCallback(async () => {
-    try {
-      const res = await apiFetch('/session-heatmap', {}, 8000);
-      if (res.ok) setHeatmap(await res.json());
-    } catch (_) {}
-  }, []);
-
-  useEffect(() => {
-    fetchHeatmap();
-    const interval = setInterval(fetchHeatmap, 30000);
-    return () => clearInterval(interval);
-  }, [fetchHeatmap]);
-
-  const fetchGateLog = useCallback(async () => {
-    try {
-      const res = await apiFetch('/gate-log', {}, 5000);
-      if (res.ok) {
-        const data = await res.json();
-        setGateLog(data.entries || []);
-      }
-    } catch (_) {}
-  }, []);
-
-  useEffect(() => {
-    fetchGateLog();
-    const interval = setInterval(fetchGateLog, 5000);
-    return () => clearInterval(interval);
-  }, [fetchGateLog]);
-
-  const fetchAssetBreakdown = useCallback(async () => {
-    try {
-      const res = await apiFetch('/asset-breakdown', {}, 8000);
-      if (res.ok) setAssetBreakdown(await res.json());
-    } catch (_) {}
-  }, []);
-
-  useEffect(() => {
-    fetchAssetBreakdown();
-    const interval = setInterval(fetchAssetBreakdown, 60000);
-    return () => clearInterval(interval);
-  }, [fetchAssetBreakdown]);
-
-  const fetchDailyPnl = useCallback(async () => {
-    try {
-      const res = await apiFetch('/daily-pnl', {}, 8000);
-      if (res.ok) setDailyPnl(await res.json());
-    } catch (_) {}
-  }, []);
-
-  useEffect(() => {
-    fetchDailyPnl();
-    const interval = setInterval(fetchDailyPnl, 120000);
-    return () => clearInterval(interval);
-  }, [fetchDailyPnl]);
-
-  const fetchSchedule = useCallback(async () => {
-    try {
-      const res = await apiFetch('/schedule', {}, 5000);
-      if (res.ok) setSchedule(await res.json());
-    } catch (_) {}
-  }, []);
-
-  useEffect(() => {
-    fetchSchedule();
-    const interval = setInterval(fetchSchedule, 30000);
-    return () => clearInterval(interval);
-  }, [fetchSchedule]);
-
-  const saveSchedule = useCallback(async (enabled, windows) => {
-    setScheduleSaving(true);
-    try {
-      const res = await apiFetch('/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled, windows }),
-      }, 6000);
-      if (res.ok) await fetchSchedule();
-    } catch (_) {}
-    setScheduleSaving(false);
-  }, [fetchSchedule]);
-
-  const runBacktest = async (asset) => {
-    setBacktestLoading(true);
-    try {
-      const res = await apiFetch(`/backtest?asset=${encodeURIComponent(asset)}&lookback=30`, {}, 15000);
-      if (res.ok) setBacktest(await res.json());
-      else setBacktest({ error: (await res.json()).detail || 'Backtest failed' });
-    } catch (err) {
-      setBacktest({ error: err.message || 'Backtest failed' });
-    } finally {
-      setBacktestLoading(false);
-    }
-  };
-
   const handleAccountChange = async (e) => {
     const selectedId = e.target.value;
     const acc = accounts.find((a) => String(a.id) === selectedId);
@@ -630,66 +331,6 @@ function App() {
     }
   };
 
-  const saveAiSettings = async ({ keys, enabled, shadowMode } = {}) => {
-    setAiSaveMsg('');
-    const payload = {};
-    if (keys !== undefined && keys !== '') payload.gemini_api_keys = keys;
-    if (enabled !== undefined) payload.ai_enabled = enabled;
-    if (shadowMode !== undefined) payload.ai_shadow_mode = shadowMode;
-    if (Object.keys(payload).length === 0) return;
-    try {
-      const res = await apiFetch('/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        const d = err.detail;
-        setAiSaveMsg(typeof d === 'string' ? d : Array.isArray(d) ? d.map(e => e.msg || JSON.stringify(e)).join('; ') : 'Save failed');
-        return;
-      }
-      setAiSaveMsg('Saved');
-      setAiKeyInput('');
-      await refreshStatus();
-    } catch (e) {
-      setAiSaveMsg('Save failed — check connection');
-    }
-  };
-
-  const saveConfig = async () => {
-    setSaveMessage('');
-    try {
-      const res = await apiFetch('/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          asset: (config.asset || '').trim(),
-          auto_select_asset: config.auto_select_asset === true,
-          simulation_mode: !!config.simulation_mode,
-          ai_shadow_mode: !!config.ai_shadow_mode,
-          sim_win_rate: parseFloat(config.sim_win_rate || 0.55),
-          avoid_markets: typeof config.avoid_markets === 'string'
-            ? config.avoid_markets.split(',').map((s) => s.trim()).filter(Boolean)
-            : config.avoid_markets || [],
-          blocked_hours: Array.isArray(config.blocked_hours) ? config.blocked_hours : [],
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        const d = err.detail;
-        setSaveMessage(typeof d === 'string' ? d : Array.isArray(d) ? d.map(e => e.msg || JSON.stringify(e)).join('; ') : 'Save failed');
-        return;
-      }
-      setSaveMessage('Saved — manual pair is a fallback when auto-pick is off.');
-      await refreshStatus();
-      await loadAssetList();
-    } catch (err) {
-      console.error('save config:', err);
-      setSaveMessage('Could not reach server');
-    }
-  };
-
   const initTierEditor = () => {
     const current = config?.budget_tiers || status?.budget_tiers || [[1, 3, 9, 25, 80, 180, 402]];
     setEditTiers(normalizeBudgetTiers(current));
@@ -704,11 +345,11 @@ function App() {
         val: b.amounts,
       }))
     : [
-        { label: '$1–$299 (Base $1)', val: [1, 3, 9, 25, 80, 180, 402] },
-        { label: '$300–$999 (Base $3)', val: [3, 9, 27, 75, 240, 540, 1206] },
-        { label: '$1,000–$2,999 (Base $9)', val: [9, 27, 81, 225, 720, 1620, 3618] },
-        { label: '$3,000–$9,999 (Base $20)', val: [20, 60, 180, 500, 1600, 3600, 8040] },
-        { label: '$10,000–$49,999 (Base $45)', val: [45, 135, 405, 1125, 3600, 8100, 18090] },
+        { label: '$1–$999 (Base $1)', val: [1, 3, 9, 25, 80, 180, 402] },
+        { label: '$1,000–$1,999 (Base $3)', val: [3, 9, 27, 75, 240, 540, 1206] },
+        { label: '$2,000–$4,999 (Base $9)', val: [9, 27, 81, 225, 720, 1620, 3618] },
+        { label: '$5,000–$24,999 (Base $20)', val: [20, 60, 180, 500, 1600, 3600, 8040] },
+        { label: '$25,000–$49,999 (Base $45)', val: [45, 135, 405, 1125, 3600, 8100, 18090] },
         { label: '$50,000+ (Base $100)', val: [100, 300, 900, 2500, 8000, 18000, 40200] },
       ];
 
@@ -750,20 +391,6 @@ function App() {
     }
   };
 
-  const loadAiComparison = async () => {
-    setAiLoading(true);
-    setAiComparison(null);
-    try {
-      const res = await apiFetch('/ai-comparison', {}, 15000);
-      if (res.ok) setAiComparison(await res.json());
-      else setAiComparison({ error: (await res.json().catch(() => ({}))).detail || 'Failed to load' });
-    } catch (err) {
-      setAiComparison({ error: err.message || 'Failed to load' });
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
   const exportTradeHistory = async (format = 'json') => {
     try {
       const res = await apiFetch(`/trades/export?format=${format}&limit=10000`, {}, 60000);
@@ -794,21 +421,6 @@ function App() {
 
   const tradeEval = (t) => t.bot_evaluation || {};
   const fmtConf = (v) => (v != null && v !== '' ? `${Math.round(Number(v) * 100)}%` : '—');
-
-  const exportAiComparison = () => {
-    if (!aiComparison?.trades) return;
-    const header = 'Time,Asset,Tier,Step,Bet,Bot Direction,Bot P/L,Bot Won,AI Approved,AI Confidence,AI Reason,AI Direction,Verdict\n';
-    const rows = aiComparison.trades.map(t =>
-      [t.ts, t.asset, t.tier, t.step, t.bet, t.bot_direction, t.bot_profit, t.bot_won, t.ai_approved, t.ai_confidence ? (t.ai_confidence * 100).toFixed(0) + '%' : '', `"${(t.ai_reason || '').replace(/"/g, "'")}"`  , t.ai_direction, t.ai_result].join(',')
-    ).join('\n');
-    const blob = new Blob([header + rows], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `ai_vs_bot_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
 
   const handleWizardSubmit = async (e) => {
     e.preventDefault();
@@ -1166,7 +778,7 @@ function App() {
                   color: '#fecaca',
                 }}
               >
-                <strong>Pair not suitable for straddle</strong>
+                <strong>Pair quality check failed</strong>
                 <p style={{ margin: '0.35rem 0 0', color: '#fca5a5' }}>
                   {status.pair_quality.reason || 'Market conditions failed quality gates.'}
                 </p>
@@ -1182,12 +794,12 @@ function App() {
             )}
             {status.pair_quality && status.pair_quality.tradeable === true && (
               <p style={{ fontSize: '0.8rem', color: '#34d399', marginTop: '0.75rem' }}>
-                Straddle OK · ER {status.pair_quality.efficiency_ratio} · slope {status.pair_quality.abs_slope}
+                Pair OK · ER {status.pair_quality.efficiency_ratio} · slope {status.pair_quality.abs_slope}
               </p>
             )}
             {status.learned_pattern?.loaded && (
               <p style={{ fontSize: '0.8rem', color: '#a78bfa', marginTop: '0.75rem' }}>
-                AI rules active ({status.learned_pattern.source_label || 'history'}):
+                Learned gates (display only) ({status.learned_pattern.source_label || 'history'}):
                 ER ≥ {status.learned_pattern.gates?.min_efficiency_ratio},
                 slope ≥ {status.learned_pattern.gates?.min_directional_slope}
                 {status.learned_pattern.focus_assets?.length > 0 && (
@@ -1247,7 +859,7 @@ function App() {
               </div>
             </div>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-              Each trade logs bot confidence, ER, slope, straddle score, alignment, and entry snapshot metrics for later analysis.
+              Each trade logs candle-follow direction, confidence, and entry snapshot metrics for later analysis.
             </p>
             <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch', fontSize: '0.8rem' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '600px' }}>
@@ -1260,7 +872,7 @@ function App() {
                     <th style={{ padding: '0.3rem 0.4rem' }}>Bot%</th>
                     <th style={{ padding: '0.3rem 0.4rem' }}>ER</th>
                     <th style={{ padding: '0.3rem 0.4rem' }}>Slope</th>
-                    <th style={{ padding: '0.3rem 0.4rem' }}>Straddle</th>
+                    <th style={{ padding: '0.3rem 0.4rem' }}>Score</th>
                     <th style={{ padding: '0.3rem 0.4rem' }}>Align</th>
                     <th style={{ padding: '0.3rem 0.4rem' }}>P/L</th>
                     <th style={{ padding: '0.3rem 0.4rem', color: 'var(--text-muted)' }}>▸</th>
@@ -1312,7 +924,7 @@ function App() {
                         <td style={{ padding: '0.35rem 0.4rem' }}>{fmtConf(ev.bot_confidence ?? t.bot_confidence)}</td>
                         <td style={{ padding: '0.35rem 0.4rem' }}>{fmtNum(ev.entry_er ?? snap.efficiency_ratio, 3)}</td>
                         <td style={{ padding: '0.35rem 0.4rem' }}>{fmtNum(ev.entry_slope_signed ?? snap.slope_signed, 1)}</td>
-                        <td style={{ padding: '0.35rem 0.4rem' }}>{fmtNum(ev.entry_straddle_score ?? snap.straddle_score, 1)}</td>
+                        <td style={{ padding: '0.35rem 0.4rem' }}>{fmtNum(ev.entry_straddle_score ?? snap.movement_score ?? snap.straddle_score, 1)}</td>
                         <td style={{ padding: '0.35rem 0.4rem', color: aligned === true ? '#34d399' : aligned === false ? '#f87171' : 'inherit' }}>
                           {aligned === true ? '✓' : aligned === false ? '✗' : '—'}
                         </td>
@@ -1342,7 +954,7 @@ function App() {
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', fontSize: '0.75rem' }}>
                                   <span><span style={{ color: 'var(--text-muted)' }}>Slope: </span><span style={{ color: (ev.entry_slope_signed ?? snap.slope_signed ?? 0) >= 0 ? '#34d399' : '#f87171' }}>{fmtNum(ev.entry_slope_signed ?? snap.slope_signed, 1)}</span></span>
                                   <span><span style={{ color: 'var(--text-muted)' }}>ER: </span><span style={{ color: '#e2e8f0' }}>{fmtNum(ev.entry_er ?? snap.efficiency_ratio, 3)}</span></span>
-                                  <span><span style={{ color: 'var(--text-muted)' }}>Straddle: </span><span style={{ color: '#e2e8f0' }}>{fmtNum(ev.entry_straddle_score ?? snap.straddle_score, 1)}</span></span>
+                                  <span><span style={{ color: 'var(--text-muted)' }}>Score: </span><span style={{ color: '#e2e8f0' }}>{fmtNum(ev.entry_straddle_score ?? snap.movement_score ?? snap.straddle_score, 1)}</span></span>
                                   <span><span style={{ color: 'var(--text-muted)' }}>Momentum: </span><span style={{ color: '#e2e8f0' }}>{fmtNum(snap.momentum_ratio, 3)}</span></span>
                                   <span><span style={{ color: 'var(--text-muted)' }}>Confidence: </span><span style={{ color: '#e2e8f0' }}>{fmtConf(ev.bot_confidence ?? t.bot_confidence)}</span></span>
                                 </div>
@@ -1411,7 +1023,7 @@ function App() {
               </table>
             </div>
             <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-              Click any trade row to expand its full reasoning — slope, ER, guards, direction logic, and AI gate decision.
+              Click any trade row to expand entry metrics and outcome details.
             </p>
           </div>
 

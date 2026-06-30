@@ -28,7 +28,7 @@
       "tier_failure_streak": 0,
       "tier_recovery_wins": 0,
       "window_profit": 0.0,
-      "evaluation_window_start": "2026-06-30T10:00:00Z",
+      "evaluation_window_start": "2026-06-30T12:00:00Z",
       "tier_exhaustion_cooldown_until": null,
       "last_tier_exhaustion_at": null,
       "window_had_tier_exhaustion": false,
@@ -39,15 +39,10 @@
       "locked_profit": 0.0,
       "risk_mode_until": null,
       "mopup_initial_debt": 0.0,
-      "ladder_attempt_id": 7,
+      "ladder_attempt_id": 15,
       "ladder_pair": null,
       "ladder_loss_scores": [],
-      "crm_mode": false,
-      "crm_tiers": [],
-      "crm_tier_index": 0,
-      "crm_target": 0.0,
-      "crm_collected": 0.0,
-      "saved_at": "2026-06-30T10:08:27.326522Z"
+      "saved_at": "2026-06-30T12:00:29.495460Z"
     }
   }
 }

@@ -259,10 +259,5 @@ def snapshot_from_bot(bot):
         "ladder_attempt_id": int(getattr(bot, "ladder_attempt_id", 0) or 0),
         "ladder_pair": getattr(bot, "ladder_pair", None),
         "ladder_loss_scores": list(getattr(bot, "ladder_loss_scores", []) or []),
-        "crm_mode": getattr(bot, "crm_mode", False),
-        "crm_tiers": getattr(bot, "crm_tiers", []),
-        "crm_tier_index": getattr(bot, "crm_tier_index", 0),
-        "crm_target": getattr(bot, "crm_target", 0.0),
-        "crm_collected": getattr(bot, "crm_collected", 0.0),
         "saved_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
     }

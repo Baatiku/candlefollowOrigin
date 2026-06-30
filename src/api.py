@@ -25,15 +25,11 @@ from trade_log import (
     export_trades_csv,
     analytics as trade_analytics,
 )
-from trade_pattern_analysis import analyze_trade_patterns
 from pair_learning import pair_learning_summary, refresh_pair_learning
-from standalone_iq import get_standalone_api, disconnect_standalone
-from simulator import simulate_sessions
 from bot_state_store import state_file_path
 from deploy_fresh import should_wipe_on_deploy
 from config import TRADING_MODE, IQ_ACCOUNT_TYPE, BOT_API_KEY, ALLOWED_ORIGINS
 import config as app_config
-from licensing import LicenseManager
 import auto_scheduler as _sched
 
 logging.basicConfig(level=logging.INFO)
@@ -82,14 +78,8 @@ _UNPROTECTED_PATHS = {
     "/api/assets",
     "/api/config",
     "/api/learned-pattern",
-    "/api/backtest",
     "/api/trade-history-analytics",
-    "/api/ai-comparison",
-    "/api/ai-optimization-logs",
-    "/api/ai-evaluator-logs",
     "/api/setup-status",
-    "/api/license/validate",
-    "/api/license/status",
     "/api/schedule",
 }
 
@@ -346,20 +336,6 @@ def complete_setup(body: SetupRequest):
     return {"ok": True, "message": "Configuration saved. Connecting to IQ Option..."}
 
 
-class LicenseRequest(BaseModel):
-    token: str
-
-
-@app.post("/api/license/validate")
-def validate_license(body: LicenseRequest):
-    return {"valid": True, "message": "Licensing disabled"}
-
-
-@app.get("/api/license/status")
-def license_status():
-    return {"valid": True, "message": "Licensing disabled", "key_configured": True}
-
-
 @app.get("/api/status")
 def get_status():
     alive = _sync_running_flag()
@@ -420,59 +396,6 @@ def get_analytics(days: int = 7):
     return stats
 
 
-@app.get("/api/pattern-analysis")
-def get_pattern_analysis(limit: int = 40, days: int = 14, include_iq: bool = True):
-    if not bot.is_session_ready():
-        raise HTTPException(status_code=503, detail="Connect to IQ Option first")
-    account_key = bot._state_account_key()
-
-    def _run():
-        return analyze_trade_patterns(
-            bot.api,
-            account_key=account_key,
-            balance_id=_current_balance_id(),
-            limit=min(max(limit, 5), 100),
-            include_iq_history=include_iq,
-            days_back=min(max(days, 1), 90),
-        )
-
-    result = {}
-    err = None
-
-    def _worker():
-        nonlocal result, err
-        try:
-            result = _run()
-        except Exception as e:
-            err = str(e)
-            logger.exception("pattern-analysis failed")
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    t.join(timeout=45.0)
-    if t.is_alive():
-        raise HTTPException(status_code=504, detail="Pattern analysis timed out (45s)")
-    if err:
-        raise HTTPException(status_code=500, detail=err)
-    result["account_key"] = account_key
-    result["active_asset"] = bot.asset
-    return result
-
-
-def _current_balance_id() -> Optional[int]:
-    bid = bot.active_balance_id
-    if bid is not None:
-        return int(bid)
-    if bot.api:
-        try:
-            from iqoptionapi.stable_api import global_value
-            if global_value.balance_id is not None:
-                return int(global_value.balance_id)
-        except Exception:
-            pass
-    return None
-
-
 @app.post("/api/learn-pattern", dependencies=[Depends(_require_api_key)])
 def refresh_pair_learning_now():
     refresh_pair_learning(force=True)
@@ -488,28 +411,6 @@ def refresh_pair_learning_now():
 @app.get("/api/learned-pattern")
 def get_learned_pattern():
     return {"pair_learning": pair_learning_summary()}
-
-
-@app.get("/api/backtest")
-def get_backtest(asset: Optional[str] = None, lookback: int = 30):
-    if not bot.is_session_ready():
-        raise HTTPException(status_code=503, detail="Connect to IQ Option first")
-    target = asset or bot.asset
-    return bot.backtest_pair_readiness(target, lookback_candles=min(max(lookback, 10), 120))
-
-
-class SimulateRequest(BaseModel):
-    win_rate: float = 0.55
-    sessions: int = 1000
-
-
-@app.post("/api/simulate")
-def run_simulation(body: SimulateRequest):
-    return simulate_sessions(
-        win_rate=body.win_rate,
-        sessions=min(body.sessions, 50000),
-        budget_tiers=[tuple(t) for t in STANDARD_BUDGET_TIERS],
-    )
 
 
 @app.get("/api/config")
@@ -529,8 +430,6 @@ def get_config():
         "sim_win_rate": bot.sim_win_rate,
         "auto_start": _should_auto_start(),
         "strategy_mode": bot.strategy_mode,
-        "ai_shadow_mode": bot.ai_shadow_mode,
-        "ai_ensemble_enabled": getattr(bot, "ai_ensemble_enabled", True),
         "blocked_hours": getattr(bot, "blocked_hours", []),
         "hour_boundary_block_minutes": getattr(bot, "hour_boundary_block_minutes", 5),
         "hour_boundary_block_end_minutes": getattr(bot, "hour_boundary_block_end_minutes", 10),
@@ -552,19 +451,7 @@ def get_config():
             [5.0, 10.0, 30.0], [10.0, 20.0, 60.0], [20.0, 40.0, 120.0],
             [40.0, 80.0, 240.0], [80.0, 160.0, 480.0], [160.0, 320.0, 960.0],
         ]),
-        "rule_gate_enabled": getattr(bot, "rule_gate_enabled", True),
-        "rule_gate_min_bot_conf": getattr(bot, "rule_gate_min_bot_conf", 0.35),
-        "rule_gate_min_er": getattr(bot, "rule_gate_min_er", 0.30),
-        "rule_gate_slope_override_min_bot_conf": getattr(bot, "rule_gate_slope_override_min_bot_conf", 0.70),
-        "rule_gate_misaligned_min_bot_conf": getattr(bot, "rule_gate_misaligned_min_bot_conf", 0.42),
         "override_blocked_windows": getattr(bot, "override_blocked_windows", False),
-        "ai_active": bot.ai_assessor is not None,
-        "ai_error_msg": getattr(bot, "ai_error_msg", ""),
-        "ai_key_count": len([
-            k.strip() for k in
-            getattr(app_config, "GEMINI_API_KEYS", "").split(",")
-            if k.strip()
-        ]),
     }
 
 
@@ -577,40 +464,6 @@ def get_trade_history_analytics(limit: int = 5000):
         "trades": read_trades(limit=min(limit, 10000), account_key=account_key),
         "account_key": account_key,
     }
-
-
-@app.get("/api/ai-optimization-logs")
-async def get_ai_opt_logs():
-    log_path = os.path.join(os.path.dirname(__file__), "..", "data", "ai_opt_log.json")
-    if not os.path.exists(log_path):
-        return []
-    try:
-        with open(log_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/ai-evaluator-logs")
-async def get_ai_evaluator_logs():
-    log_path = os.path.join(os.path.dirname(__file__), "..", "data", "ai_evaluator_log.json")
-    if not os.path.exists(log_path):
-        return []
-    try:
-        with open(log_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/trigger-optimization", dependencies=[Depends(_require_api_key)])
-async def trigger_ai_opt():
-    if not bot:
-        raise HTTPException(status_code=503, detail="Bot not initialized")
-    if not bot.ai_assessor:
-        raise HTTPException(status_code=400, detail="AI Assessor not configured. Provide Gemini API keys.")
-    bot.run_ai_agent_pipeline()
-    return {"status": "success", "message": "Multi-Agent Optimization Pipeline triggered in the background."}
 
 
 def _normalize_budget_tiers(raw):
@@ -1005,7 +858,6 @@ class ConfigUpdate(BaseModel):
     strategy_mode: Optional[str] = None
     budget_tiers: Optional[List[Any]] = None
     auto_bracket_enabled: Optional[bool] = None
-    ai_shadow_mode: Optional[bool] = None
     blocked_hours: Optional[List[int]] = None
     hour_boundary_block_minutes: Optional[int] = None
     hour_boundary_block_end_minutes: Optional[int] = None
@@ -1014,14 +866,7 @@ class ConfigUpdate(BaseModel):
     trading_timezone: Optional[str] = None
     sequential_steps_mode: Optional[bool] = None
     sequential_amounts: Optional[Any] = None
-    rule_gate_enabled: Optional[bool] = None
-    rule_gate_min_bot_conf: Optional[float] = None
-    rule_gate_min_er: Optional[float] = None
-    rule_gate_slope_override_min_bot_conf: Optional[float] = None
-    rule_gate_misaligned_min_bot_conf: Optional[float] = None
     override_blocked_windows: Optional[bool] = None
-    gemini_api_keys: Optional[str] = None
-    ai_enabled: Optional[bool] = None
 
     @field_validator("budget_tiers", mode="before")
     @classmethod
@@ -1065,228 +910,6 @@ def get_assets():
     except Exception as e:
         logger.warning("get_assets failed: %s", e)
         return {"error": str(e), "open_assets": [], "active_asset": bot.asset}
-
-
-@app.get("/api/ai-comparison")
-def get_ai_comparison():
-    from trade_log import read_trades as _read_all
-    all_trades = _read_all(limit=500)
-    comparison = []
-    bot_wins = bot_losses = ai_would_win = ai_would_lose = ai_agreed = ai_no_data = 0
-    bot_pnl = 0.0
-    ai_pnl = 0.0
-
-    for t in all_trades:
-        if t.get("partial"):
-            continue
-        profit = float(t.get("round_profit", 0))
-        bet = float(t.get("bet", 1))
-        ai_approved = t.get("ai_approved")
-        bot_won = profit >= 0
-        bot_pnl += profit
-        if bot_won:
-            bot_wins += 1
-        else:
-            bot_losses += 1
-        if ai_approved is None:
-            ai_no_data += 1
-            ai_pnl += profit
-            ai_result = "no_data"
-        elif ai_approved:
-            ai_agreed += 1
-            ai_pnl += profit
-            ai_result = "agreed_win" if bot_won else "agreed_loss"
-            if bot_won:
-                ai_would_win += 1
-            else:
-                ai_would_lose += 1
-        else:
-            ai_result = "saved_loss" if not bot_won else "missed_win"
-            if not bot_won:
-                ai_would_win += 1
-            else:
-                ai_would_lose += 1
-        comparison.append({
-            "ts": t.get("ts"),
-            "asset": t.get("asset"),
-            "tier": t.get("tier"),
-            "step": t.get("step"),
-            "bet": bet,
-            "bot_direction": t.get("bot_direction"),
-            "bot_profit": profit,
-            "bot_won": bot_won,
-            "ai_approved": ai_approved,
-            "ai_confidence": t.get("ai_confidence"),
-            "ai_reason": t.get("ai_reason"),
-            "ai_direction": t.get("ai_direction"),
-            "ai_result": ai_result,
-        })
-
-    total = bot_wins + bot_losses
-    return {
-        "total_trades": total,
-        "bot": {
-            "wins": bot_wins,
-            "losses": bot_losses,
-            "win_rate": round(bot_wins / total * 100, 1) if total else 0,
-            "pnl": round(bot_pnl, 2),
-        },
-        "ai": {
-            "correct_calls": ai_would_win,
-            "wrong_calls": ai_would_lose,
-            "no_data": ai_no_data,
-            "agreed_with_bot": ai_agreed,
-            "pnl": round(ai_pnl, 2),
-        },
-        "trades": comparison,
-    }
-
-
-# ── Admin: License Token Management ────────────────────────────────────────
-
-def _admin_db_conn():
-    import psycopg2
-    return psycopg2.connect(os.environ["DATABASE_URL"])
-
-
-@app.get("/api/admin/tokens", dependencies=[Depends(_require_api_key)])
-def admin_list_tokens():
-    try:
-        conn = _admin_db_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT token_key, status, duration_days, activated_at, expires_at, "
-            "hwid, is_trial, created_at FROM tokens ORDER BY created_at DESC"
-        )
-        rows = cur.fetchall()
-        cur.close(); conn.close()
-        return {"tokens": [
-            {
-                "token_key": r[0], "status": r[1], "duration_days": r[2],
-                "activated_at": r[3].isoformat() if r[3] else None,
-                "expires_at": r[4].isoformat() if r[4] else None,
-                "hwid": r[5], "is_trial": r[6],
-                "created_at": r[7].isoformat() if r[7] else None,
-            }
-            for r in rows
-        ]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-class CreateTokenRequest(BaseModel):
-    duration_days: int = 30
-    token_key: str = ""
-
-
-@app.post("/api/admin/tokens", dependencies=[Depends(_require_api_key)])
-def admin_create_token(body: CreateTokenRequest = CreateTokenRequest()):
-    import uuid as _uuid
-    days = max(1, min(int(body.duration_days), 3650))
-    key = (body.token_key or "").strip().upper()
-    if not key:
-        key = f"BESTA-{_uuid.uuid4().hex[:4].upper()}-{_uuid.uuid4().hex[:4].upper()}"
-    try:
-        conn = _admin_db_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO tokens (token_key, status, duration_days) VALUES (%s, 'unclaimed', %s) "
-            "ON CONFLICT (token_key) DO NOTHING RETURNING token_key",
-            (key, days)
-        )
-        result = cur.fetchone()
-        conn.commit(); cur.close(); conn.close()
-        if not result:
-            raise HTTPException(status_code=409, detail="Token key already exists")
-        return {"token_key": key, "duration_days": days, "status": "unclaimed"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/admin/tokens/{token_key}/revoke", dependencies=[Depends(_require_api_key)])
-def admin_revoke_token(token_key: str):
-    try:
-        conn = _admin_db_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE tokens SET status='revoked' WHERE token_key=%s RETURNING token_key",
-            (token_key,)
-        )
-        row = cur.fetchone()
-        conn.commit(); cur.close(); conn.close()
-        if not row:
-            raise HTTPException(status_code=404, detail="Token not found")
-        return {"token_key": token_key, "status": "revoked"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/admin/tokens/{token_key}", dependencies=[Depends(_require_api_key)])
-def admin_delete_token(token_key: str):
-    try:
-        conn = _admin_db_conn()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM tokens WHERE token_key=%s RETURNING token_key", (token_key,))
-        row = cur.fetchone()
-        conn.commit(); cur.close(); conn.close()
-        if not row:
-            raise HTTPException(status_code=404, detail="Token not found")
-        return {"deleted": token_key}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/admin/tokens/{token_key}/unrevoke", dependencies=[Depends(_require_api_key)])
-def admin_unrevoke_token(token_key: str):
-    try:
-        conn = _admin_db_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE tokens SET status='active' WHERE token_key=%s AND status='revoked' RETURNING token_key",
-            (token_key,)
-        )
-        row = cur.fetchone()
-        conn.commit(); cur.close(); conn.close()
-        if not row:
-            raise HTTPException(status_code=404, detail="Token not found or not revoked")
-        return {"token_key": token_key, "status": "active"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/admin/stats", dependencies=[Depends(_require_api_key)])
-def admin_stats():
-    try:
-        conn = _admin_db_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM trades")
-        trade_count = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM tokens")
-        token_count = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM tokens WHERE status='active'")
-        active_tokens = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM bot_states")
-        state_count = cur.fetchone()[0]
-        cur.execute("SELECT updated_at FROM kv_store WHERE key='pair_learning'")
-        pl_row = cur.fetchone()
-        cur.close(); conn.close()
-        return {
-            "trade_count": trade_count,
-            "token_count": token_count,
-            "active_tokens": active_tokens,
-            "bot_state_count": state_count,
-            "pair_learning_updated_at": pl_row[0].isoformat() if pl_row else None,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Session Heatmap ─────────────────────────────────────────────────────────
