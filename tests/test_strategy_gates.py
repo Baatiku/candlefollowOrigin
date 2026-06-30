@@ -392,15 +392,24 @@ class TestBalanceTierBrackets(unittest.TestCase):
         bot.auto_bracket_enabled = True
         bot.current_tier_index = 0
         bot._update_budget_tiers_for_balance(600.0)
+        self.assertEqual(bot.budget_tiers[0][0], 1)
+
+    def test_seven_hundred_uses_three_dollar_base(self):
+        bot = DoubleMartingaleBot(simulation_mode=True)
+        bot.auto_bracket_enabled = True
+        bot.current_tier_index = 0
+        bot._update_budget_tiers_for_balance(750.0)
         self.assertEqual(bot.budget_tiers[0][0], 3)
 
     def test_bracket_labels_include_ranges(self):
         brackets = balance_tier_brackets()
-        self.assertTrue(any("$1,000" in b["range_label"] for b in brackets))
+        self.assertTrue(any("$700" in b["range_label"] for b in brackets))
         self.assertEqual(brackets[0]["min_balance"], 1)
-        self.assertEqual(brackets[0]["max_balance"], 299)
-        self.assertEqual(brackets[2]["min_balance"], 1000)
-        self.assertEqual(brackets[2]["max_balance"], 2999)
+        self.assertEqual(brackets[0]["max_balance"], 699)
+        self.assertEqual(brackets[1]["min_balance"], 700)
+        self.assertEqual(brackets[1]["max_balance"], 1999)
+        self.assertEqual(brackets[2]["min_balance"], 2000)
+        self.assertEqual(brackets[2]["max_balance"], 4999)
 
 
 class TestPairGateHelpers(unittest.TestCase):
