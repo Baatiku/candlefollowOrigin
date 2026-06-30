@@ -394,6 +394,8 @@ class DoubleMartingaleBot:
         # recent winning average (the market is no longer as directional).
         self._pair_win_er_history: dict = {}   # asset -> [er, er, ...]
         self._pair_recent_results: dict = {}  # asset -> [True/False, ...] recent win/loss window
+        self._pair_consecutive_losses: dict = {}  # asset -> int session consecutive losses
+        self._active_pair_baseline: dict = {}  # metrics snapshot when pair was selected
         self._last_gate_er: float = 0.0        # ER captured at the moment of entry
         self.last_pair_quality = {}
         self.last_entry_snapshot = None
@@ -501,6 +503,8 @@ class DoubleMartingaleBot:
         self._hot_pair_consecutive_wins = 0
         self._pair_win_er_history.clear()
         self._pair_recent_results.clear()
+        self._pair_consecutive_losses.clear()
+        self._active_pair_baseline.clear()
         self._last_gate_er = 0.0
         self._inflight_trade_ids = []
         self._last_ladder_prep_key = None
@@ -1430,8 +1434,8 @@ class DoubleMartingaleBot:
 
     def _rotate_asset_after_step_five(self, outcome):
         """
-        Step 5 win or loss: the pair is too risky to keep — 30m ban and switch.
-        Only fires on the trade that completed at human step 5 (index 4).
+        Step 5 win or loss: mark pair for future scans — do NOT switch mid-ladder.
+        Pair stays locked until the tier cycle completes (user requirement).
         """
         if self.session_round_count != STEP_FIVE_ROTATION_INDEX:
             return
@@ -1439,22 +1443,18 @@ class DoubleMartingaleBot:
         self._apply_asset_penalty_uncapped(
             asset,
             STEP_FIVE_ASSET_PENALTY_MINUTES,
-            f"step 5 {outcome} — risky pair rotation",
+            f"step 5 {outcome} — defer rescan until step 1",
         )
         self._notify(
-            "Pair rotated",
+            "Pair flagged",
             f"{asset} reached step 5 ({outcome}). "
-            f"Banned {STEP_FIVE_ASSET_PENALTY_MINUTES}m; switching pair.",
+            f"Penalty {STEP_FIVE_ASSET_PENALTY_MINUTES}m for future scans; "
+            f"continuing this ladder on {asset}.",
         )
-        if self.auto_select_asset:
-            self._apply_auto_asset_selection(reason=f"step 5 {outcome} rotation")
-            self._wait_for_price_data()
-        else:
-            self.last_asset_selection_note = (
-                f"{asset} hit step 5 ({outcome}). "
-                f"Pick another pair or enable auto-select."
-            )
-            logger.warning(self.last_asset_selection_note)
+        logger.warning(
+            f"{asset} step 5 {outcome} — penalty applied for future selection; "
+            f"mid-ladder lock keeps {asset} for remaining steps"
+        )
 
     def _check_deep_sequence_strike(self, completed_step: int):
         """
@@ -1567,6 +1567,15 @@ class DoubleMartingaleBot:
         return self._seconds_past_candle() > self._placement_deadline_second()
 
     def _handle_penalty_box_block(self):
+        if self._in_active_ladder():
+            until = self.asset_penalty_box.get(self.asset)
+            remaining = max(0.0, (until - datetime.datetime.utcnow()).total_seconds())
+            mins = max(1, int(remaining / 60))
+            logger.info(
+                f"{self.asset} in penalty box (~{mins}m) but mid-ladder lock active "
+                f"(step {self.session_round_count + 1}) — continuing on same pair"
+            )
+            return
         until = self.asset_penalty_box.get(self.asset)
         remaining = max(0.0, (until - datetime.datetime.utcnow()).total_seconds())
         mins = max(1, int(remaining / 60))
@@ -1780,6 +1789,155 @@ class DoubleMartingaleBot:
             logger.warning(f"Failed momentum check for {asset_name}: {e}")
             return True, 0.0, 0.0
 
+    @staticmethod
+    def _count_candle_alternations(candles, lookback=None):
+        """Count bullish/bearish color flips over the last `lookback` closed candles."""
+        lookback = lookback or getattr(app_config, "RANGING_LOOKBACK_CANDLES", 6)
+        if not candles:
+            return 0
+        recent = candles[-lookback:] if len(candles) >= lookback else candles
+        colors = []
+        for c in recent:
+            open_p = float(c.get("open", 0) or 0)
+            close_p = float(c.get("close", 0) or 0)
+            colors.append(close_p >= open_p)
+        alternations = 0
+        for i in range(1, len(colors)):
+            if colors[i] != colors[i - 1]:
+                alternations += 1
+        return alternations
+
+    def _closed_candle_direction(self, asset_name):
+        """Direction implied by the last fully closed candle: call=green, put=red."""
+        tf = int(getattr(app_config, "FOLLOW_CANDLE_TIMEFRAME", 60))
+        lookback = getattr(app_config, "RANGING_LOOKBACK_CANDLES", 6)
+        candles = self._get_candles_safe(
+            asset_name, tf, lookback + 2, time.time()
+        )
+        if not candles or len(candles) < 2:
+            return None
+        closed = candles[:-1]
+        last = closed[-1]
+        open_p = float(last.get("open", 0) or 0)
+        close_p = float(last.get("close", 0) or 0)
+        return "call" if close_p >= open_p else "put"
+
+    def _record_pair_selection_baseline(self, asset_name, movement_data, reason=""):
+        """Snapshot rank metrics when a pair is chosen — used for step-1 degradation checks."""
+        if not asset_name or not movement_data:
+            return
+        self._active_pair_baseline = {
+            "asset": asset_name,
+            "rank_score": round(self._asset_rank_score(movement_data), 1),
+            "straddle_score": float(movement_data.get("straddle_score", 0) or 0),
+            "er": float(movement_data.get("efficiency_ratio", 0) or 0),
+            "alternations": int(movement_data.get("alternations", 0) or 0),
+            "path_ratio": float(movement_data.get("path_ratio", 0) or 0),
+            "selected_at": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "reason": reason,
+        }
+        logger.info(
+            f"📌 Pair baseline — {asset_name}: rank={self._active_pair_baseline['rank_score']:.0f}, "
+            f"ER={self._active_pair_baseline['er']:.2f}, "
+            f"alts={self._active_pair_baseline['alternations']}, "
+            f"straddle={self._active_pair_baseline['straddle_score']:.0f} ({reason})"
+        )
+
+    def _pair_baseline_degraded(self, current):
+        """True when live scan metrics fell materially below selection baseline."""
+        baseline = self._active_pair_baseline or {}
+        if baseline.get("asset") != self.asset:
+            return False, ""
+        er_ratio = float(getattr(app_config, "PAIR_QUALITY_DEGRADATION_ER_RATIO", 0.75))
+        rank_ratio = float(getattr(app_config, "PAIR_QUALITY_DEGRADATION_RANK_RATIO", 0.70))
+        max_alt = int(getattr(app_config, "RANGING_MAX_ALTERNATIONS", 3))
+
+        cur_er = float(current.get("efficiency_ratio", 0) or 0)
+        base_er = float(baseline.get("er", 0) or 0)
+        if base_er > 0.05 and cur_er < base_er * er_ratio:
+            return True, f"ER {cur_er:.2f} < {er_ratio:.0%} of baseline {base_er:.2f}"
+
+        cur_rank = self._asset_rank_score(current)
+        base_rank = float(baseline.get("rank_score", 0) or 0)
+        if base_rank > 0 and cur_rank < base_rank * rank_ratio:
+            return True, (
+                f"rank {cur_rank:.0f} < {rank_ratio:.0%} of baseline {base_rank:.0f}"
+            )
+
+        cur_alt = int(current.get("alternations", 0) or 0)
+        base_alt = int(baseline.get("alternations", 0) or 0)
+        if cur_alt > max_alt and cur_alt > base_alt:
+            return True, f"alternations worsened {base_alt}→{cur_alt} (max {max_alt})"
+
+        cur_path = float(current.get("path_ratio", 0) or 0)
+        base_path = float(baseline.get("path_ratio", 0) or 0)
+        whipsaw_er = float(getattr(app_config, "WHIIPSAW_MAX_ER", 0.32))
+        whipsaw_path = float(getattr(app_config, "WHIIPSAW_PATH_RATIO_THRESHOLD", 2.8))
+        if (
+            cur_path >= whipsaw_path
+            and cur_er <= whipsaw_er
+            and cur_path > base_path * 1.15
+        ):
+            return True, f"chop signature path={cur_path:.1f} ER={cur_er:.2f}"
+
+        return False, ""
+
+    def _apply_consecutive_loss_penalty(self, asset, reason):
+        mins = int(getattr(app_config, "PAIR_CONSECUTIVE_LOSS_PENALTY_MINUTES", 15))
+        self._apply_asset_penalty_uncapped(asset, mins, reason)
+        self._pair_consecutive_losses[asset] = 0
+
+    def _check_pair_performance_at_step_one(self):
+        """
+        At step 1 only: if this pair lost N times in a row, rescan and compare to
+        the baseline from when we picked it. Penalize + rescan if conditions degraded.
+        Never switches pairs mid-ladder.
+        """
+        threshold = int(getattr(app_config, "PAIR_CONSECUTIVE_LOSS_THRESHOLD", 4))
+        streak = int(self._pair_consecutive_losses.get(self.asset, 0) or 0)
+        if streak < threshold:
+            return True
+
+        current = self._score_asset_movement(self.asset)
+        if not current:
+            logger.warning(
+                f"📉 {self.asset}: {streak} consecutive losses — no candle data for rescan"
+            )
+            return True
+
+        degraded, detail = self._pair_baseline_degraded(current)
+        baseline = self._active_pair_baseline or {}
+        logger.info(
+            f"📉 {self.asset} performance review after {streak} losses: "
+            f"now rank={self._asset_rank_score(current):.0f}/ER={current.get('efficiency_ratio', 0):.2f}/"
+            f"alts={current.get('alternations', 0)} vs baseline "
+            f"rank={baseline.get('rank_score', '?')}/ER={baseline.get('er', '?')}/"
+            f"alts={baseline.get('alternations', '?')}"
+        )
+
+        if not degraded:
+            logger.info(
+                f"📉 {self.asset}: {streak} losses but metrics still near baseline — keeping pair"
+            )
+            self._pair_consecutive_losses[self.asset] = 0
+            return True
+
+        logger.warning(
+            f"📉 {self.asset}: degraded after {streak} losses ({detail}) — "
+            f"{getattr(app_config, 'PAIR_CONSECUTIVE_LOSS_PENALTY_MINUTES', 15)}m penalty, rescanning"
+        )
+        self._apply_consecutive_loss_penalty(
+            self.asset, f"{streak} consecutive losses — {detail}"
+        )
+        self._active_pair_baseline.clear()
+        if self.auto_select_asset:
+            self._apply_auto_asset_selection(reason="pair performance degradation", relaxed=True)
+            self._wait_for_price_data()
+            fresh = self._score_asset_movement(self.asset)
+            if fresh:
+                self._record_pair_selection_baseline(self.asset, fresh, "post-degradation rescan")
+        return self._score_asset_movement(self.asset) is not None
+
     def _score_asset_movement(self, asset_name):
         if not self.api:
             return None
@@ -1875,10 +2033,23 @@ class DoubleMartingaleBot:
                 straddle_penalty += extension_penalty
 
         straddle_score = max(0.0, score - straddle_penalty)
+        lookback = getattr(app_config, "RANGING_LOOKBACK_CANDLES", 6)
+        closed_for_chop = candles[:-1] if len(candles) > 1 else candles
+        alternations = self._count_candle_alternations(closed_for_chop, lookback)
+        max_alt = int(getattr(app_config, "RANGING_MAX_ALTERNATIONS", 3))
+        whipsaw_path_thr = float(getattr(app_config, "WHIIPSAW_PATH_RATIO_THRESHOLD", 2.8))
+        whipsaw_max_er = float(getattr(app_config, "WHIIPSAW_MAX_ER", 0.32))
+        chop_reason = ""
+        if alternations > max_alt:
+            chop_reason = f"whipsaw alternations {alternations}>{max_alt}"
+        elif path_ratio >= whipsaw_path_thr and er <= whipsaw_max_er:
+            chop_reason = f"choppy path={path_ratio:.1f} ER={er:.2f}"
+
         tradeable = (
             er >= min_er
             and abs_slope >= min_slope
             and score >= self.min_asset_score
+            and not chop_reason
         )
 
         # Body-to-range ratio for the most recent candles (feature 3: wick quality).
@@ -1901,6 +2072,8 @@ class DoubleMartingaleBot:
             "active_ratio": round(active_ratio, 2),
             "range_pct": round(range_pct * 100, 4),
             "path_ratio": round(path_ratio, 2),
+            "alternations": alternations,
+            "chop_reason": chop_reason,
             "candles": len(closes),
             "atr": round(atr, 6),
             "body_quality": body_quality,
@@ -1983,23 +2156,18 @@ class DoubleMartingaleBot:
         adx_period = 14
         
         try:
-            # Need enough candles for ADX + lookback
             tf = int(getattr(app_config, "FOLLOW_CANDLE_TIMEFRAME", 60))
             candles = self._get_candles_safe(asset_name, tf, adx_period * 2 + lookback, time.time())
             if not candles or len(candles) < lookback + 1:
                 result["reason"] = f"Not enough {tf}s candles"
                 return result
                 
-            # The last candle in the array from IQ Option is the currently forming candle.
-            # We strictly want the direction of the LAST FULLY CLOSED candle.
             closed_candles = candles[:-1] if len(candles) > 1 else candles
             if not closed_candles:
                 result["reason"] = "No closed candles"
                 return result
                 
-            # Ranging filter: ADX
             adx_value = self._calculate_adx(closed_candles, adx_period)
-            min_adx = float(getattr(app_config, "RANGING_MIN_ADX", 25.0))
             
             recent_candles = closed_candles[-lookback:]
             colors = []
@@ -2008,21 +2176,35 @@ class DoubleMartingaleBot:
                 open_p = float(c.get("open", 0))
                 colors.append(close_p >= open_p)
                 
-            # Ranging filter: Alternations
             alternations = 0
             for i in range(1, len(colors)):
                 if colors[i] != colors[i-1]:
                     alternations += 1
                     
             last_color = colors[-1]
-            result["direction"] = "call" if last_color else "put"
+            candle_dir = "call" if last_color else "put"
+            result["direction"] = candle_dir
+            result["candle_color"] = "green" if last_color else "red"
+            result["alternations"] = alternations
+            result["adx"] = round(adx_value, 1)
+            # Active ladder: always trade — candle follow is mandatory once a pair is chosen.
             result["tradeable"] = True
             result["reason"] = "Passed"
+            if alternations > max_alt:
+                result["chop_advisory"] = (
+                    f"whipsaw advisory: {alternations}/{lookback - 1} alternations (scan max {max_alt})"
+                )
             
-            # Merge additional metrics so the gate check doesn't use 0.0 defaults
             base = self._score_asset_movement(asset_name)
             if base:
+                scan_tradeable = base.get("tradeable")
+                chop_reason = base.get("chop_reason") or ""
                 result.update(base)
+                result["tradeable"] = True
+                result["reason"] = "Passed"
+                if chop_reason and not result.get("chop_advisory"):
+                    result["chop_advisory"] = f"scan chop: {chop_reason}"
+                result["scan_would_skip"] = not scan_tradeable
             else:
                 result.update({
                     "straddle_score": 0.0,
@@ -2031,7 +2213,11 @@ class DoubleMartingaleBot:
                     "abs_slope": 0.0
                 })
             
-            logger.info(f"Candle Follow {asset_name}: ADX {adx_value:.1f}, Alts: {alternations}/{lookback}. Signal: {result['direction'].upper()}")
+            chop_note = f" | {result['chop_advisory']}" if result.get("chop_advisory") else ""
+            logger.info(
+                f"Candle Follow {asset_name}: last closed {result['candle_color'].upper()}→"
+                f"{candle_dir.upper()}, ADX {adx_value:.1f}, Alts: {alternations}/{lookback - 1}{chop_note}"
+            )
             return result
         except Exception as e:
             logger.error(f"Candle Follow evaluation failed: {e}")
@@ -2061,6 +2247,10 @@ class DoubleMartingaleBot:
         min_er = gates["min_efficiency_ratio"]
         min_slope = gates["min_directional_slope"]
         failures = []
+
+        chop_reason = base.get("chop_reason") or ""
+        if chop_reason:
+            failures.append(chop_reason)
 
         if er < min_er:
             failures.append(f"choppy market (ER {er:.3f} < {min_er})")
@@ -2442,21 +2632,33 @@ class DoubleMartingaleBot:
         # still tradeable, stay on it — don't switch just because another pair
         # scored higher this candle.
         _HOT_PAIR_MIN_WINS = 2
-        _loyalty_override_reasons = {"rejection penalty", "penalty box", "tier exhausted penalty", "recovery debt chipping"}
+        _loyalty_override_reasons = {
+            "rejection penalty",
+            "penalty box",
+            "tier exhausted penalty",
+            "recovery debt chipping",
+            "pair performance degradation",
+        }
         if (
             self._hot_pair
             and self._hot_pair == self.asset
             and self._hot_pair_consecutive_wins >= _HOT_PAIR_MIN_WINS
             and reason not in _loyalty_override_reasons
+            and self.session_round_count == 0
         ):
             current = self._score_asset_movement(self.asset)
-            if current and current.get("tradeable"):
-                self.last_asset_selection_note = (
-                    f"🔥 Loyalty lock — {self.asset} "
-                    f"({self._hot_pair_consecutive_wins}W streak, still tradeable)"
+            if current:
+                degraded, detail = self._pair_baseline_degraded(current)
+                if not degraded:
+                    self.last_asset_selection_note = (
+                        f"🔥 Hot pair loyalty — {self.asset} "
+                        f"({self._hot_pair_consecutive_wins}W streak, baseline intact)"
+                    )
+                    logger.info(self.last_asset_selection_note)
+                    return
+                logger.info(
+                    f"Hot pair {self.asset} baseline degraded ({detail}) — allowing rescan"
                 )
-                logger.info(self.last_asset_selection_note)
-                return
 
         # STRICT CANDLE FOLLOW: Never switch pairs mid-ladder.
         if self._in_active_ladder() and reason != "trading start":
@@ -2494,17 +2696,31 @@ class DoubleMartingaleBot:
             self._switch_trading_asset(best)
             self._wait_for_price_data()
             self._pair_filter_skip_streak[self.asset] = 0
+            if self.session_round_count == 0:
+                self._record_pair_selection_baseline(
+                    best, best_data, reason or "auto-select"
+                )
             self.last_asset_selection_note = (
                 f"Selected {best} (straddle {best_score:.0f}, "
                 f"ER {best_data.get('efficiency_ratio', 0):.2f}) — {summary}"
             )
         else:
+            if self.session_round_count == 0 and best_data:
+                self._record_pair_selection_baseline(
+                    best, best_data, reason or "keeping current"
+                )
             self.last_asset_selection_note = (
                 f"Keeping {best} (straddle {best_score:.0f}) — {summary}"
             )
         logger.info(self.last_asset_selection_note)
 
     def _switch_to_next_tradeable_pair(self, reason, relaxed=False):
+        if self._in_active_ladder():
+            logger.info(
+                f"Mid-ladder lock — cannot switch from {self.asset} "
+                f"(step {self.session_round_count + 1}); reason was: {reason}"
+            )
+            return False
         candidates = self._resolve_asset_candidates()
         ranked = []
         for name in candidates:
@@ -2522,6 +2738,10 @@ class DoubleMartingaleBot:
         new_asset = ranked[0][0]
         if self._switch_trading_asset(new_asset):
             self._pair_filter_skip_streak[new_asset] = 0
+            if self.session_round_count == 0:
+                movement = self._score_asset_movement(new_asset)
+                if movement:
+                    self._record_pair_selection_baseline(new_asset, movement, reason)
             logger.info(
                 f"Switched to {new_asset} (straddle {ranked[0][1]:.0f}) — {reason}"
             )
@@ -2624,6 +2844,9 @@ class DoubleMartingaleBot:
 
     def _ensure_tradeable_market(self):
         """Called only at step 1 — safe to auto-select since no trades are in play."""
+        if not self._check_pair_performance_at_step_one():
+            return False
+
         if not self.asset:
             if self.auto_select_asset:
                 self._apply_auto_asset_selection(reason="initial selection", relaxed=True)
@@ -2635,6 +2858,25 @@ class DoubleMartingaleBot:
         if quality["tradeable"]:
             self._pair_filter_skip_streak[self.asset] = 0
             return True
+
+        # Risky-pair ER floor at step 1 only (scan gate — does not block mid-ladder candle follow).
+        pair_floors = getattr(app_config, "ASSET_MIN_ER", {})
+        if self.asset in pair_floors:
+            er_floor = max(self.rule_gate_min_er, pair_floors[self.asset])
+            live_er = float(quality.get("efficiency_ratio", 0) or 0)
+            if live_er < er_floor:
+                logger.warning(
+                    f"{self.asset} ER {live_er:.2f} below risky-pair floor {er_floor:.2f} at step 1"
+                )
+                if self.auto_select_asset:
+                    self._apply_auto_asset_selection(
+                        reason=f"ER {live_er:.2f} < floor {er_floor:.2f}", relaxed=True
+                    )
+                    quality = self._assess_straddle_suitability(self.asset, check_momentum=False)
+                    self.last_pair_quality = quality
+                    if quality.get("tradeable"):
+                        self._pair_filter_skip_streak[self.asset] = 0
+                        return True
 
         # Step 1: no trades placed on this tier yet, safe to switch.
         if self.auto_select_asset:
@@ -5402,6 +5644,13 @@ class DoubleMartingaleBot:
                         continue
 
                     target_dir = pair_quality["direction"]
+                    candle_dir = self._closed_candle_direction(self.asset)
+                    if candle_dir and target_dir != candle_dir:
+                        logger.warning(
+                            f"Candle follow correction: evaluator={target_dir.upper()} "
+                            f"last closed candle={candle_dir.upper()} — using candle"
+                        )
+                        target_dir = candle_dir
                     self.last_trend_direction = target_dir
                     
                     self._log_entry_timing("pre-strike refresh")
@@ -5480,17 +5729,22 @@ class DoubleMartingaleBot:
                         self._skip_to_next_entry_window("purchase deadline")
                         continue
 
-                    # ── Entry Gate Bypassed for Strict Candle Follow ──
+                    # Candle follow: log live metrics but never block mid-ladder on ER/chop gates.
+                    pq = self.last_pair_quality or pair_quality or {}
+                    _gate_er = float(pq.get("efficiency_ratio", 0) or 0)
+                    _gate_slope = float(pq.get("abs_slope", 0) or 0)
+                    if target_dir == "put":
+                        _gate_slope = -abs(_gate_slope)
+                    self._last_gate_er = _gate_er
                     self._last_ai_decision = {
                         "approve": True,
                         "bot_confidence": 1.0,
                         "ensemble_combined_confidence": 1.0,
                         "reason": "strict candle follow",
                         "ai_disabled": True,
-                        "gate_slope": 0.0,
-                        "gate_er": 0.0,
+                        "gate_slope": _gate_slope,
+                        "gate_er": _gate_er,
                     }
-                    _gate_er = 0.0
 
 
                     _entry_bot_conf = None
@@ -5645,6 +5899,7 @@ class DoubleMartingaleBot:
                         _rr.append(True)
                         if len(_rr) > _rr_window:
                             _rr.pop(0)
+                        self._pair_consecutive_losses[self.asset] = 0
                     else:
                         self.losses += 1
                         self._record_ladder_step_loss(self._pending_entry_quality)
@@ -5654,6 +5909,8 @@ class DoubleMartingaleBot:
                         _rr_loss.append(False)
                         if len(_rr_loss) > _rr_loss_window:
                             _rr_loss.pop(0)
+                        streak = self._pair_consecutive_losses.get(self.asset, 0) + 1
+                        self._pair_consecutive_losses[self.asset] = streak
                         if round_profit < 0:
                             self._apply_round_loss_to_debt(round_profit)
 
@@ -5942,6 +6199,10 @@ class DoubleMartingaleBot:
             },
             "asset_scores": self.asset_scores,
             "asset_selection_note": self.last_asset_selection_note,
+            "active_pair_baseline": getattr(self, "_active_pair_baseline", {}) or {},
+            "pair_consecutive_losses": int(
+                (getattr(self, "_pair_consecutive_losses", {}) or {}).get(self.asset, 0)
+            ),
             "pair_quality": self.last_pair_quality,
             "pair_learning": pair_learning_summary(),
             "gates_for_active_pair": self._straddle_gate_thresholds(self.asset),

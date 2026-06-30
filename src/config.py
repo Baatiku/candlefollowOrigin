@@ -13,6 +13,15 @@ FOLLOW_CANDLE_TIMEFRAME = 60   # 1 minute
 RANGING_LOOKBACK_CANDLES = 6   # How many candles to look back for ranging filter
 RANGING_MAX_ALTERNATIONS = 3   # Max color changes allowed in the lookback window
 RANGING_MIN_ADX = float(os.getenv("RANGING_MIN_ADX", "20.0"))
+# Scan-time whipsaw: high path-to-range with low ER = price zigzags without direction
+WHIIPSAW_PATH_RATIO_THRESHOLD = float(os.getenv("WHIIPSAW_PATH_RATIO_THRESHOLD", "2.8"))
+WHIIPSAW_MAX_ER = float(os.getenv("WHIIPSAW_MAX_ER", "0.32"))
+
+# Pair performance vs selection baseline (checked only at step 1 — never mid-ladder)
+PAIR_CONSECUTIVE_LOSS_THRESHOLD = int(os.getenv("PAIR_CONSECUTIVE_LOSS_THRESHOLD", "4"))
+PAIR_CONSECUTIVE_LOSS_PENALTY_MINUTES = int(os.getenv("PAIR_CONSECUTIVE_LOSS_PENALTY_MINUTES", "15"))
+PAIR_QUALITY_DEGRADATION_ER_RATIO = float(os.getenv("PAIR_QUALITY_DEGRADATION_ER_RATIO", "0.75"))
+PAIR_QUALITY_DEGRADATION_RANK_RATIO = float(os.getenv("PAIR_QUALITY_DEGRADATION_RANK_RATIO", "0.70"))
 
 if not IQ_EMAIL or not IQ_PASSWORD:
     import logging
