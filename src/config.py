@@ -34,11 +34,11 @@ BOT_API_KEY = os.getenv("BOT_API_KEY", "")
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()] or ["*"]
 
-# Entry window for 5-minute options
-ENTRY_WINDOW_START = int(os.getenv("ENTRY_WINDOW_START", "0"))  # Seconds into the candle to start looking
-ENTRY_WINDOW_END = int(os.getenv("ENTRY_WINDOW_END", "60"))     # Seconds into the candle to stop looking
-PURCHASE_DEADLINE_SEC = int(os.getenv("PURCHASE_DEADLINE_SEC", "60"))
-ENTRY_HARD_ABORT_SEC = int(os.getenv("ENTRY_HARD_ABORT_SEC", "65"))
+# Entry window for 1-minute turbo options — tight to candle open boundary
+ENTRY_WINDOW_START = int(os.getenv("ENTRY_WINDOW_START", "0"))   # Seconds into candle to start looking
+ENTRY_WINDOW_END = int(os.getenv("ENTRY_WINDOW_END", "10"))      # Only first 10s of each candle
+PURCHASE_DEADLINE_SEC = int(os.getenv("PURCHASE_DEADLINE_SEC", "25"))  # Must send order within 25s
+ENTRY_HARD_ABORT_SEC = int(os.getenv("ENTRY_HARD_ABORT_SEC", "30"))    # Hard abort at 30s
 MIN_SECONDS_TO_EXPIRY = int(os.getenv("MIN_SECONDS_TO_EXPIRY", "240")) # 4 minutes minimum
 MAX_SECONDS_TO_EXPIRY = int(os.getenv("MAX_SECONDS_TO_EXPIRY", "300")) # 5 minutes maximum
 MOMENTUM_MIN_RATIO = float(os.getenv("MOMENTUM_MIN_RATIO", "0.65"))

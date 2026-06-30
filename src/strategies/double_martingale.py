@@ -69,8 +69,8 @@ BALANCE_TIER_TABLE = [
 ]
 
 # Human step 5 → 0-based ladder index 4. Win/loss here triggers pair rotation.
-STEP_FIVE_ROTATION_INDEX = 4
-STEP_FIVE_ASSET_PENALTY_MINUTES = 30
+STEP_FOUR_ROTATION_INDEX = 3
+STEP_FOUR_ASSET_PENALTY_MINUTES = 30
 
 
 def balance_tier_brackets():
@@ -1432,27 +1432,27 @@ class DoubleMartingaleBot:
             f"(until {until.strftime('%H:%M')} UTC)"
         )
 
-    def _rotate_asset_after_step_five(self, outcome):
+    def _rotate_asset_after_step_four(self, outcome):
         """
-        Step 5 win or loss: mark pair for future scans — do NOT switch mid-ladder.
+        After 4 consecutive losses: mark pair for future scans — do NOT switch mid-ladder.
         Pair stays locked until the tier cycle completes (user requirement).
         """
-        if self.session_round_count != STEP_FIVE_ROTATION_INDEX:
+        if self.session_round_count != STEP_FOUR_ROTATION_INDEX:
             return
         asset = self.asset
         self._apply_asset_penalty_uncapped(
             asset,
-            STEP_FIVE_ASSET_PENALTY_MINUTES,
-            f"step 5 {outcome} — defer rescan until step 1",
+            STEP_FOUR_ASSET_PENALTY_MINUTES,
+            f"step 4 {outcome} — defer rescan until step 1",
         )
         self._notify(
             "Pair flagged",
-            f"{asset} reached step 5 ({outcome}). "
-            f"Penalty {STEP_FIVE_ASSET_PENALTY_MINUTES}m for future scans; "
+            f"{asset} reached step 4 ({outcome}). "
+            f"Penalty {STEP_FOUR_ASSET_PENALTY_MINUTES}m for future scans; "
             f"continuing this ladder on {asset}.",
         )
         logger.warning(
-            f"{asset} step 5 {outcome} — penalty applied for future selection; "
+            f"{asset} step 4 {outcome} — penalty applied for future selection; "
             f"mid-ladder lock keeps {asset} for remaining steps"
         )
 
@@ -4560,12 +4560,10 @@ class DoubleMartingaleBot:
         return self._server_timestamp() % 60
 
     def _seconds_past_candle(self):
-        # Time since the start of the current candle
+        # Time since the start of the current candle — use server UTC to match IQ Option boundaries
         ts = self._server_timestamp()
         tf = int(getattr(app_config, "FOLLOW_CANDLE_TIMEFRAME", 60))
-        # Add offset to align with IQOption candle open boundaries
-        dt = datetime.datetime.fromtimestamp(ts)
-        return (dt.hour * 3600 + dt.minute * 60 + dt.second) % tf
+        return ts % tf
 
     def _expiry_from_symbol(self, symbol):
         date_str = symbol.split("A")[1][:8]
@@ -4624,28 +4622,14 @@ class DoubleMartingaleBot:
         self._log_entry_timing("window ready")
 
     def _skip_to_next_entry_window(self, reason):
-        tier = self.current_tier_index + 1
-        step = self.session_round_count + 1
-        if self.trading_mode == "turbo":
-            # In turbo mode, just wait a short cooldown — no minute boundary needed
-            wait = 5.0
-            logger.info(
-                f"Still Tier {tier} step {step}/{self.session_max_rounds} — "
-                f"skip ({reason}). Retrying in {wait:.0f}s..."
-            )
-            if not self._interruptible_sleep(wait):
-                return
-            return
-        seconds_past = self._seconds_past_minute()
-        if seconds_past <= self.entry_window_end:
-            wait = (60 - seconds_past) + self.entry_window_start
-        else:
-            wait = max(0.0, (60 - seconds_past) + self.entry_window_start)
+        tf = int(getattr(app_config, "FOLLOW_CANDLE_TIMEFRAME", 60))
+        seconds_past = self._seconds_past_candle()
+        wait = max(1.0, (tf - seconds_past) + self.entry_window_start)
         tier = self.current_tier_index + 1
         step = self.session_round_count + 1
         logger.info(
             f"Still Tier {tier} step {step}/{self.session_max_rounds} — "
-            f"skip ({reason}). Next entry window in {wait:.1f}s..."
+            f"skip ({reason}). Next candle boundary in {wait:.1f}s..."
         )
         if not self._interruptible_sleep(wait):
             return
@@ -5930,15 +5914,28 @@ class DoubleMartingaleBot:
                         logger.info("Stop requested — exiting after trade settled")
                         break
 
+                    _balance_downgrade_round = self.last_bet_breakdown.get("balance_downgrade", False) if self.last_bet_breakdown else False
+
                     if not both_lost:
                         logger.info(
                             f"ROUND WON — at least one leg profitable (Tier {self.current_tier_index + 1})."
                         )
-                        self._rotate_asset_after_step_five("win")
+                        self._rotate_asset_after_step_four("win")
+                        self._consecutive_full_ladder_losses = 0
+                        self._finalize_session("Round Won")
+                    elif _balance_downgrade_round:
+                        logger.warning(
+                            f"Balance too low for scheduled step — played affordable fallback bet. "
+                            f"Forcing session reset to step 1 (debt remains: ${self.cumulative_debt:.2f})."
+                        )
+                        self._notify(
+                            "Balance downgrade reset",
+                            f"Scheduled step unaffordable — played fallback bet. Resetting to step 1. Debt ${self.cumulative_debt:.2f}.",
+                        )
                         self._consecutive_full_ladder_losses = 0
                         self._finalize_session("Round Won")
                     else:
-                        self._rotate_asset_after_step_five("loss")
+                        self._rotate_asset_after_step_four("loss")
                         # One ladder step per round.
                         steps_consumed = 1
                             
