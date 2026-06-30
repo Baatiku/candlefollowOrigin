@@ -227,14 +227,41 @@ function App() {
     const selectedId = e.target.value;
     const acc = accounts.find((a) => String(a.id) === selectedId);
     if (!acc) return;
+    if (status?.running) {
+      setActionError('');
+      try {
+        const stopRes = await apiFetch('/stop', { method: 'POST' }, ACTION_TIMEOUT_MS);
+        if (!stopRes.ok) {
+          const data = await stopRes.json().catch(() => ({}));
+          setActionError(data.detail || 'Stop the bot before switching accounts');
+          await refreshStatus();
+          return;
+        }
+        await refreshStatus();
+      } catch (_) {
+        setActionError('Could not stop bot before account switch');
+        return;
+      }
+    }
     try {
-      await apiFetch('/account', {
+      const res = await apiFetch('/account', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ account_type: acc.type, balance_id: acc.id }),
-      });
+      }, ACTION_TIMEOUT_MS);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setActionError(data.detail || 'Account switch failed');
+        await refreshStatus();
+        return;
+      }
       await refreshStatus();
+      const accountsRes = await apiFetch('/accounts');
+      if (accountsRes.ok) {
+        setAccounts((await accountsRes.json()).accounts || []);
+      }
     } catch (err) {
+      setActionError('Account switch failed');
       console.error('account switch:', err);
     }
   };

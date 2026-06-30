@@ -152,6 +152,7 @@ def _start_trading_thread():
         bot.last_error = ""
         bot.last_stop_reason = ""
         bot.paused = False
+        bot.manual_stop_requested = False
         bot.running = True
         bot_thread = threading.Thread(target=_run_bot_wrapper, name="trading-loop")
         bot_thread.daemon = True
@@ -551,8 +552,9 @@ def reconnect():
             bot.warm_up_market_feed()
             bot.last_error = ""
             bot.persist_state("reconnected")
-            if _should_auto_start() and not (bot.running and _thread_alive()):
-                _start_trading_thread()
+            if _should_auto_start() and not getattr(bot, "manual_stop_requested", False):
+                if not (bot.running and _thread_alive()):
+                    _start_trading_thread()
         else:
             bot.last_error = "Reconnect failed"
 
@@ -608,9 +610,8 @@ def start_bot(body: StartRequest = StartRequest()):
 def stop_bot():
     with _lifecycle_lock:
         was_alive = _thread_alive()
-        if was_alive:
-            bot.stop()
-        else:
+        bot.stop(manual=True)
+        if not was_alive:
             _sync_running_flag()
 
     def _join_stopped_thread():
@@ -884,6 +885,16 @@ class ConfigUpdate(BaseModel):
 def set_account(body: AccountSwitch):
     if not bot.connected:
         raise HTTPException(status_code=400, detail="Bot not connected")
+    _sync_running_flag()
+    if bot.running or _thread_alive():
+        bot.stop(manual=True)
+        if not _wait_for_trading_thread_stop(timeout=45.0):
+            _abandon_stuck_thread()
+        if _thread_alive():
+            raise HTTPException(
+                status_code=409,
+                detail="Bot is still stopping — wait a few seconds and try switching again",
+            )
     if body.account_type == "TOURNAMENT" and body.balance_id:
         if not bot.switch_trading_account("TOURNAMENT", balance_id=body.balance_id):
             raise HTTPException(status_code=500, detail="Failed to switch to tournament account")

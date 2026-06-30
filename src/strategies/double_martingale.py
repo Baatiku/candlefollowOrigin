@@ -418,6 +418,7 @@ class DoubleMartingaleBot:
         self._session_ready = threading.Event()
         self._connecting = False
         self._graceful_stop = False
+        self.manual_stop_requested = False
         self._market_feed_active = False
 
         self._enforce_standard_budget_tiers()
@@ -4375,9 +4376,8 @@ class DoubleMartingaleBot:
                 f"⏳ Waiting {wait:.1f}s for entry window "
                 f"(now {seconds_past}s past candle boundary)..."
             )
-            end_t = time.time() + wait
-            while time.time() < end_t and self.running:
-                time.sleep(min(0.25, end_t - time.time()))
+            if not self._interruptible_sleep(wait):
+                return
 
         self._log_entry_timing("window ready")
 
@@ -4391,9 +4391,8 @@ class DoubleMartingaleBot:
                 f"Still Tier {tier} step {step}/{self.session_max_rounds} — "
                 f"skip ({reason}). Retrying in {wait:.0f}s..."
             )
-            end_t = time.time() + wait
-            while time.time() < end_t and self.running:
-                time.sleep(min(1.0, end_t - time.time()))
+            if not self._interruptible_sleep(wait):
+                return
             return
         seconds_past = self._seconds_past_minute()
         if seconds_past <= self.entry_window_end:
@@ -4406,9 +4405,8 @@ class DoubleMartingaleBot:
             f"Still Tier {tier} step {step}/{self.session_max_rounds} — "
             f"skip ({reason}). Next entry window in {wait:.1f}s..."
         )
-        end_t = time.time() + wait
-        while time.time() < end_t and self.running:
-            time.sleep(min(1.0, end_t - time.time()))
+        if not self._interruptible_sleep(wait):
+            return
 
     def _passes_volatility_filters(self, call_info, put_info, check_momentum=True):
         """Delegates to unified straddle suitability (same rules as pair ranking)."""
@@ -4596,7 +4594,8 @@ class DoubleMartingaleBot:
         )
         end_t = time.time() + max(0.0, remaining)
         while time.time() < end_t and self.running and not self.paused:
-            time.sleep(min(1.0, end_t - time.time()))
+            if not self._interruptible_sleep(min(1.0, end_t - time.time())):
+                return
 
     def _sync_assigned_tier_for_trading(self, balance=None):
         """
@@ -5090,7 +5089,12 @@ class DoubleMartingaleBot:
             logger.info("  *** SIMULATION MODE — no real orders ***")
         logger.info("=" * 60)
 
-        self.running = True
+        if not self.running:
+            logger.info("Stop received before trading loop started — exiting")
+            self.last_stop_reason = self.last_stop_reason or "Stopped before loop entry"
+            self.persist_state(self.last_stop_reason)
+            return
+
         self.paused = False
         self.last_error = ""
 
@@ -5511,6 +5515,9 @@ class DoubleMartingaleBot:
                     self._log_entry_timing("pre-placement")
                     self._capture_entry_snapshot_at_placement()
 
+                    if not self.running:
+                        break
+
                     with self._round_placement_lock:
                         if self._round_in_flight:
                             logger.warning(
@@ -5662,6 +5669,10 @@ class DoubleMartingaleBot:
                     self._maybe_sync_balance_after_trade()
                     logger.info(f"Balance: ${self.safe_get_balance():.2f}")
 
+                    if not self.running:
+                        logger.info("Stop requested — exiting after trade settled")
+                        break
+
                     if not both_lost:
                         logger.info(
                             f"ROUND WON — at least one leg profitable (Tier {self.current_tier_index + 1})."
@@ -5776,10 +5787,12 @@ class DoubleMartingaleBot:
             logger.info(f"  Final Balance: ${self.safe_get_balance():.2f}")
             logger.info("=" * 60)
 
-    def stop(self):
+    def stop(self, manual=True):
         self._graceful_stop = True
         self.running = False
         self.paused = False
+        if manual:
+            self.manual_stop_requested = True
         with self._round_placement_lock:
             self._round_in_flight = False
         self.last_stop_reason = "Stop requested from dashboard"
@@ -5823,6 +5836,7 @@ class DoubleMartingaleBot:
             "simulation_mode": self.simulation_mode,
             "running_flag": self.running,
             "thread_alive": thread_alive,
+            "manual_stop_requested": getattr(self, "manual_stop_requested", False),
             "can_start": self.connected and not effective_running,
             "last_stop_reason": self.last_stop_reason,
             "last_error": self.last_error,

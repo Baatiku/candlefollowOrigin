@@ -216,15 +216,25 @@ def start_scheduler(bot_ref, thread_alive_fn, start_trading_fn, license_valid_fn
                     in_win = in_schedule_window(windows, lagos_min)
                     is_running = bot_ref.running and thread_alive_fn()
                     is_connected = bot_ref.is_session_ready()
+                    manual_stop = getattr(bot_ref, "manual_stop_requested", False)
 
-                    if in_win and not is_running and is_connected and license_valid_fn():
+                    if (
+                        in_win
+                        and not is_running
+                        and is_connected
+                        and license_valid_fn()
+                        and not manual_stop
+                    ):
                         logger.info("Scheduler: entering window — starting bot")
                         if start_trading_fn():
                             scheduler_started_bot = True
-                    elif not in_win and is_running and scheduler_started_bot:
-                        logger.info("Scheduler: window ended — stopping bot")
-                        bot_ref.stop()
-                        scheduler_started_bot = False
+                    elif not in_win:
+                        if is_running and scheduler_started_bot:
+                            logger.info("Scheduler: window ended — stopping bot")
+                            bot_ref.stop(manual=False)
+                            scheduler_started_bot = False
+                        # Outside all windows — allow auto-start when the next window opens
+                        bot_ref.manual_stop_requested = False
             except Exception as e:
                 logger.warning("Scheduler loop error: %s", e)
             time.sleep(60)
