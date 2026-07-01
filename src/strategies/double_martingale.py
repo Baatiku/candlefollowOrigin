@@ -8,6 +8,7 @@ Martingale ladder advances on loss, resets on win; balance-based tier brackets.
 import time
 import json
 import logging
+import math
 import threading
 from collections import deque
 import datetime
@@ -25,8 +26,9 @@ from bot_state_store import (
     snapshot_from_bot,
 )
 from notifier import notify as send_alert
-from trade_log import append_trade, copy_bot_evaluation, copy_entry_snapshot
+from trade_log import append_trade, copy_bot_evaluation, copy_entry_snapshot, get_recent_trades
 from market_metrics import entry_snapshot_from_candles
+from pair_health import asset_health_check, pattern_quality_factor, adjusted_score as ph_adjusted_score
 from pair_learning import (
     clear_pair_learning_store,
     effective_gates_for_asset,
@@ -377,6 +379,13 @@ class DoubleMartingaleBot:
         self._gate_rejection_log: deque = deque(maxlen=50)
         self._asset_deep_strike_count = {}
         self._pair_filter_skip_streak = {}
+        # Per-asset empirical suspension state (pair_health.py)
+        self.asset_suspension_enabled: bool = bool(getattr(app_config, "ASSET_SUSPENSION_ENABLED", True))
+        self.asset_suspension_shadow_mode: bool = bool(getattr(app_config, "ASSET_SUSPENSION_SHADOW_MODE", True))
+        self.asset_suspension_lookback: int = int(getattr(app_config, "ASSET_SUSPENSION_LOOKBACK", 40))
+        self.asset_suspension_min_wilson_winrate: float = float(getattr(app_config, "ASSET_SUSPENSION_MIN_WILSON_WINRATE", 0.40))
+        self.asset_suspension_cooldown_seconds: float = float(getattr(app_config, "ASSET_SUSPENSION_COOLDOWN_SECONDS", 6 * 3600))
+        self._asset_suspension_timestamps: dict = {}  # asset → unix ts of last suspension
         # Hot-pair loyalty: track consecutive wins on the same pair this session.
         # After HOT_PAIR_MIN_WINS wins the bot stays on that pair as long as it
         # is still tradeable — it only switches when the pair loses or goes flat.
@@ -2076,9 +2085,54 @@ class DoubleMartingaleBot:
                 _bq_ratios.append(abs(_cl - _o) / _rng if _rng > 0 else 1.0)
         body_quality = round(sum(_bq_ratios) / len(_bq_ratios), 3) if _bq_ratios else 0.5
 
+        # ── Choppiness Index ─────────────────────────────────────────────────
+        # Standard Dreiss CI: 100 * log10(sum_ATR1 / total_range) / log10(N)
+        # Ranges 0–100: >61.8 = choppy/consolidating, <38.2 = trending.
+        # First bar TR = high-low (no prior close); subsequent bars use full ATR.
+        try:
+            _sum_tr1 = 0.0
+            for _ci_i in range(len(candles)):
+                _oc, _hc, _lc, _cc = self._candle_ohlc(candles[_ci_i])
+                if _ci_i == 0:
+                    _tr = _hc - _lc  # first bar: no prior close available
+                else:
+                    _prev_close = self._candle_ohlc(candles[_ci_i - 1])[3]
+                    _tr = max(_hc - _lc, abs(_hc - _prev_close), abs(_lc - _prev_close))
+                _sum_tr1 += _tr
+            _ci_range = total_range
+            _ci_n = len(candles)  # full period count per Dreiss formula
+            if _ci_range > 0 and _ci_n > 1:
+                choppiness_index = round(
+                    100.0 * math.log10(_sum_tr1 / _ci_range) / math.log10(_ci_n),
+                    2,
+                )
+                choppiness_index = max(0.0, min(100.0, choppiness_index))
+            else:
+                choppiness_index = 50.0  # neutral fallback
+        except Exception:
+            choppiness_index = 50.0
+
+        # ── Score reweighting: CI/ER quality penalty multiplier ──────────────
+        # Geometric-mean factor so ANY one bad dimension (chop, low ER, heavy
+        # spikes) crushes the whole score — chop/spike dominate the ranking.
+        # spike_rejection_ratio is not computed at this stage; defaults to 0.
+        quality_factor = 1.0
+        adj_straddle_score = straddle_score
+        if getattr(app_config, "SCORE_REWEIGHT_ENABLED", False):
+            quality_factor = pattern_quality_factor(
+                choppiness_index=choppiness_index,
+                efficiency_ratio=er,
+                spike_rejection_ratio=0.0,
+                er_target=getattr(app_config, "SCORE_REWEIGHT_ER_TARGET", 0.5),
+            )
+            adj_straddle_score = ph_adjusted_score(straddle_score, quality_factor)
+
         return {
             "score": round(max(0.0, score), 1),
             "straddle_score": round(straddle_score, 1),
+            "adj_straddle_score": round(adj_straddle_score, 2),
+            "quality_factor": round(quality_factor, 3),
+            "choppiness_index": choppiness_index,
             "tradeable": tradeable,
             "efficiency_ratio": round(er, 3),
             "abs_slope": round(abs_slope, 1),
@@ -2505,8 +2559,15 @@ class DoubleMartingaleBot:
         captures that directional clarity.  We keep straddle as the base (it
         gates minimum tradeable movement) and multiply by (1 + ER) so a pair
         with ER=0.8 scores 80 % higher than the same straddle at ER=0.
+
+        When SCORE_REWEIGHT_ENABLED, the quality-adjusted straddle score is used
+        instead so chop/spike-heavy pairs are penalised at ranking time.
         """
-        straddle = float(data.get("straddle_score", data.get("score", 0)) or 0)
+        raw_straddle = float(data.get("straddle_score", data.get("score", 0)) or 0)
+        if getattr(app_config, "SCORE_REWEIGHT_ENABLED", False):
+            straddle = float(data.get("adj_straddle_score", raw_straddle) or raw_straddle)
+        else:
+            straddle = raw_straddle
         if getattr(self, "strategy_mode", "") == "directional_trend":
             er = float(data.get("efficiency_ratio", 0) or 0)
             return straddle * (1.0 + er)
@@ -2583,12 +2644,20 @@ class DoubleMartingaleBot:
             reverse=True,
         )
         top5 = ranked[:5]
+        _reweight_on = getattr(app_config, "SCORE_REWEIGHT_ENABLED", False)
         logger.info(
-            "Top pairs (rank/straddle/ER): "
+            "Top pairs (rank/straddle"
+            + ("/adj" if _reweight_on else "")
+            + "/ER): "
             + ", ".join(
                 f"{name}={self._asset_rank_score(data):.0f}"
                 f"/S{data.get('straddle_score', data['score']):.0f}"
-                f"/ER{data.get('efficiency_ratio', 0):.2f}"
+                + (
+                    f"/A{data.get('adj_straddle_score', data.get('straddle_score', data['score'])):.1f}"
+                    f"/Q{data.get('quality_factor', 1.0):.2f}"
+                    if _reweight_on else ""
+                )
+                + f"/ER{data.get('efficiency_ratio', 0):.2f}"
                 for name, data in top5
             )
         )
@@ -5688,6 +5757,73 @@ class DoubleMartingaleBot:
                         logger.warning(f"Pair not ready for Follow Candle: {pair_quality.get('reason')}")
                         self._handle_trade_gate_failure(pair_quality.get("reason"))
                         continue
+
+                    # ── Asset suspension gate (empirical win-rate, shadow mode) ────
+                    # Runs AFTER per-round gate so we don't add DB I/O on rounds that
+                    # were already skipped for other reasons.
+                    if self.asset_suspension_enabled:
+                        _susp_now = time.time()
+                        _last_susp = self._asset_suspension_timestamps.get(self.asset, 0)
+                        _in_cooldown = (
+                            _last_susp > 0
+                            and (_susp_now - _last_susp) < self.asset_suspension_cooldown_seconds
+                        )
+                        if _in_cooldown:
+                            _remaining = self.asset_suspension_cooldown_seconds - (_susp_now - _last_susp)
+                            _susp_log = {
+                                "reason": "asset_suspension_cooldown",
+                                "asset": self.asset,
+                                "would_suspend": True,
+                                "shadow_mode": self.asset_suspension_shadow_mode,
+                                "cooldown_remaining_sec": round(_remaining, 1),
+                                "ts": _susp_now,
+                            }
+                            self._gate_rejection_log.append(_susp_log)
+                            if not self.asset_suspension_shadow_mode:
+                                logger.info(
+                                    f"⏭️ {self.asset}: suspension cooldown "
+                                    f"({_remaining:.0f}s remaining)"
+                                )
+                                self._skip_to_next_entry_window("asset suspension cooldown")
+                                continue
+                        else:
+                            _health = asset_health_check(
+                                self.asset,
+                                get_recent_trades,
+                                lookback=self.asset_suspension_lookback,
+                                min_wilson_winrate=self.asset_suspension_min_wilson_winrate,
+                            )
+                            _susp_log = {
+                                "reason": "asset_health_check",
+                                "asset": self.asset,
+                                "would_suspend": _health["would_suspend"],
+                                "shadow_mode": self.asset_suspension_shadow_mode,
+                                "wilson_lower_bound": _health.get("wilson_lower_bound"),
+                                "raw_winrate": _health.get("raw_winrate"),
+                                "sample_size": _health.get("sample_size"),
+                                "ts": _susp_now,
+                            }
+                            if _health["would_suspend"]:
+                                self._gate_rejection_log.append(_susp_log)
+                                # Record timestamp in BOTH modes so shadow logs
+                                # reflect cooldown behavior before enforcement is
+                                # turned on — this is observability, not blocking.
+                                self._asset_suspension_timestamps[self.asset] = _susp_now
+                                if not self.asset_suspension_shadow_mode:
+                                    logger.info(
+                                        f"⏭️ Suspending {self.asset}: wilson_lb="
+                                        f"{_health['wilson_lower_bound']} over "
+                                        f"{_health['sample_size']} rounds"
+                                    )
+                                    self._skip_to_next_entry_window("asset suspension")
+                                    continue
+                                else:
+                                    logger.info(
+                                        f"🔍 [SHADOW] Would suspend {self.asset}: "
+                                        f"wilson_lb={_health.get('wilson_lower_bound')} "
+                                        f"raw_wr={_health.get('raw_winrate')} "
+                                        f"n={_health.get('sample_size')} (shadow, not blocking)"
+                                    )
 
                     target_dir = pair_quality["direction"]
                     candle_dir = self._closed_candle_direction(self.asset)

@@ -573,6 +573,18 @@ def read_trades(limit=50, account_key=None):
     return list(reversed(trades[-limit:]))
 
 
+def get_recent_trades(asset: str, count: int = 40) -> list:
+    """Return the most recent `count` completed (non-partial) trades for `asset`,
+    newest-first. Fetches a larger window and filters by asset so the caller
+    always gets up to `count` asset-specific entries regardless of how many
+    other assets appear in the log."""
+    all_trades = read_trades(limit=max(count * 8, 200))
+    return [
+        t for t in all_trades
+        if t.get("asset") == asset and not t.get("partial")
+    ][:count]
+
+
 def _compute_analytics(trades_iter, days, account_key):
     """Shared analytics computation over an iterable of trade dicts."""
     cutoff = datetime.utcnow() - timedelta(days=days)

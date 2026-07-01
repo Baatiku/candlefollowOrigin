@@ -1,42 +1,53 @@
 ---
 name: BestaBot architecture
-description: Key design decisions for the Besta Bot FastAPI + React trading dashboard.
+description: Key files, patterns, and conventions for the BestaBot IQ Option trading bot.
 ---
 
-## Auth pattern (BOT_API_KEY)
-Write endpoints use `Depends(_require_api_key)` which checks the `X-API-Key` header against `BOT_API_KEY` env var. If `BOT_API_KEY` is empty the check is skipped (backward-compatible). Read/status endpoints are unprotected.
+# BestaBot Architecture
 
-## License gate
-`license_gate` middleware in `api.py` intercepts all `/api/*` calls except a whitelist of read-only paths. Returns 403 if `_license_valid` is False. `LicenseManager` lives in `src/licensing.py`. Frontend shows `LicenseGate` overlay when `/api/license/status` returns `valid: false` OR when `/api/status` returns `license_valid: false`.
+**Why:** Fast orientation across a large codebase (double_martingale.py alone is 6500+ lines).
 
-## Lifecycle lock
-`_lifecycle_lock` (threading.Lock) must wrap every operation that starts, stops, or reconfigures the trading thread — including the `/api/config` POST. Without it, concurrent config updates and start/stop calls race on the same bot instance.
+## Core entry points
+- `src/api.py` — FastAPI server, port 5000
+- `src/strategies/double_martingale.py` — entire trading engine: `DoubleMartingale` class
+- `src/config.py` — all config constants, env-var overrides via `os.getenv`
 
-## Atomic state writes
-`bot_state_store.py` writes via `.tmp` → `os.replace()` with a `.bak` backup. A module-level `_store_lock` prevents RMW races between the trading thread and FastAPI web thread.
+## Auth / lifecycle pattern
+- License gate is checked at startup, not per-trade
+- `_trading_loop_lock` (threading.Lock) prevents duplicate run() calls
+- `self.running` / `self.paused` control the main loop
+- `self.persist_state()` saves bot state to `bot_state_store`
 
-## Strategy monolith
-`src/strategies/double_martingale.py` is ~7100 lines. The `src/strategies/` subdirectories (`mixins/`, `ladder/`, `execution/`, `market/`, `risk/`, `analysis/`) are scaffolded stubs for the planned modularisation — do NOT move live code there without following `docs/ARCHITECTURE_REFACTOR.md` step-by-step.
+## Asset scoring / selection
+- `_score_asset_movement(asset)` → dict with score, straddle_score, adj_straddle_score, efficiency_ratio, choppiness_index, quality_factor, tradeable
+- `_asset_rank_score(data)` → final rank value (uses adj_straddle_score when SCORE_REWEIGHT_ENABLED)
+- `_select_best_asset()` → picks highest-rank tradeable pair
+- `_apply_auto_asset_selection()` → wrapper with hot-pair loyalty logic
 
-**Why:** Partial extraction breaks the monolith without completing it, leaving a mix of old and new import paths that is harder to debug than either state alone.
+## Pre-trade gate pattern (in _run_trading_loop)
+Checks run in order:
+1. Time window blocks (UTC ban, soft ban, legacy hour block)
+2. Balance / step checks
+3. `_ensure_tradeable_market()` → candle/straddle gate
+4. `_evaluate_candle_follow()` → direction + entry quality
+5. Asset suspension gate (pair_health.py, shadow mode)
+6. Strike selection + expiry check
+7. Placement
 
-## Signal gate pipeline (directional_trend mode)
-Gates run in order; any failure calls `_skip_to_next_entry_window()` or `continue`:
-1. Volatility/suitability — `_assess_straddle_suitability()` (ER, slope, movement, momentum)
-2. AI/rule confidence gate — `check_rule_based_entry_gate()` or AI ensemble — inside `try` block (~lines 5870–6257)
-3. **Enhanced conviction gate** — `check_enhanced_conviction()` — at END of same `try` block (~lines 6258–6296), 28-space indentation inside the try
+## Gate rejection log
+`self._gate_rejection_log` (deque maxlen=50) stores dicts with reason, asset, would_suspend, shadow_mode, ts etc. for all gate rejections including asset suspension checks.
 
-**try/except indentation rule:** `try:` is at 24sp, content at 28sp, `except:` at 24sp. The conviction gate MUST be at 28sp (inside try) — at 24sp it's between `try` and `except` which is a SyntaxError.
+## Trade log
+- `src/trade_log.py`: `append_trade`, `read_trades(limit, account_key)`, `get_recent_trades(asset, count)`, `analytics`
+- Storage: PostgreSQL when available, JSONL fallback at `data/` dir
+- `get_recent_trades` fetches `count*8` trades and filters by asset (newest-first)
 
-## Enhanced conviction gate (5 signal quality improvements)
-Functions added to `src/ensemble.py`: `compute_signal_coherence()` + `check_enhanced_conviction()`.
-Config constants in `config.py` (all env-overridable): `ENHANCED_CONVICTION_ENABLED`, `MIN_CANDLE_BODY_QUALITY` (0.15), `MIN_SIGNAL_COHERENCE` (0.22), `MIN_SIGNAL_COHERENCE_STEP3` (0.38), `MIN_ALIGNED_SIGNALS_STEP3` (2), `MIN_RECENT_WIN_RATE_STEP3` (0.25), `MIN_RECENT_TRADES_FOR_RATE` (4), `PAIR_RECENT_RESULT_WINDOW` (6).
+## Pair health / score reweighting (added)
+- `src/pair_health.py`: `wilson_lower_bound`, `asset_health_check`, `pattern_quality_factor`, `adjusted_score`
+- Config: ASSET_SUSPENSION_ENABLED, ASSET_SUSPENSION_SHADOW_MODE (hardcoded True), SCORE_REWEIGHT_ENABLED (default True)
+- Shadow mode MUST default True for any new empirical gate — never flip without data review
 
-- **Feature 1 (direction consistency)** — slope alignment weighted 35% in coherence score
-- **Feature 2 (composite conviction)** — `compute_signal_coherence()`: slope 35% + ER 25% + momentum 20% + body 20%
-- **Feature 3 (candle body quality)** — `candle_body_quality()` in `market_metrics.py`; body/range ratio, floor 0.15; also added to `entry_snapshot_from_candles()` return dict
-- **Feature 4 (recent asset momentum)** — `_pair_recent_results` dict in bot (per-asset rolling True/False list); at step 3+, win rate < 25% over last 4+ trades skips
-- **Feature 5 (step direction agreement)** — step 3+: requires 2/3 signals (slope direction, momentum ≥0.80, body ≥0.28) aligned with trade direction
-
-`body_quality` data path: `_score_asset_movement()` → returned in its dict → forwarded by `_assess_straddle_suitability()` → stored in `self.last_pair_quality` → read by conviction gate.
-`_pair_recent_results` init/clear: `__init__` and `_clear_ephemeral_session_state()` (alongside `_pair_win_er_history`). Updated after each round outcome.
+## Never touch
+- Staking / ladder / martingale math in double_martingale.py (STANDARD_BUDGET_TIERS, BALANCE_TIER_TABLE)
+- risk_governor.py (separate scope)
+- double_martingale.py budget/recovery math

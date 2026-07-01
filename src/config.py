@@ -275,6 +275,19 @@ STEP_SCORE_ESCALATION_ENABLED = os.getenv("STEP_SCORE_ESCALATION_ENABLED", "true
 STEP_SCORE_MIN_IMPROVEMENT = float(os.getenv("STEP_SCORE_MIN_IMPROVEMENT", "0.02"))
 STEP_SCORE_MAX_SKIPS_BEFORE_PAIR_SWITCH = int(os.getenv("STEP_SCORE_MAX_SKIPS_BEFORE_PAIR_SWITCH", "2"))
 
+# Empirical per-asset suspension (pair_health.py)
+ASSET_SUSPENSION_ENABLED = os.getenv("ASSET_SUSPENSION_ENABLED", "true").lower() == "true"
+ASSET_SUSPENSION_SHADOW_MODE = True   # START True. Log-only. Do not flip to
+                                       # False until reviewed — see acceptance
+                                       # criteria in pair_health task spec.
+ASSET_SUSPENSION_LOOKBACK = int(os.getenv("ASSET_SUSPENSION_LOOKBACK", "40"))
+ASSET_SUSPENSION_MIN_WILSON_WINRATE = float(os.getenv("ASSET_SUSPENSION_MIN_WILSON_WINRATE", "0.40"))
+ASSET_SUSPENSION_COOLDOWN_SECONDS = float(os.getenv("ASSET_SUSPENSION_COOLDOWN_SECONDS", str(6 * 3600)))
+
+# Score reweighting — applies CI/ER quality penalty to raw movement score at asset selection
+SCORE_REWEIGHT_ENABLED = os.getenv("SCORE_REWEIGHT_ENABLED", "true").lower() == "true"
+SCORE_REWEIGHT_ER_TARGET = float(os.getenv("SCORE_REWEIGHT_ER_TARGET", "0.5"))
+
 # Sequential Steps Mode: when true, advances steps by schedule regardless of outcome.
 # When false (classic martingale): advance step only on loss, reset to S1 on any win.
 # Classic martingale is active — each win immediately covers prior losses and returns
