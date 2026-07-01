@@ -815,33 +815,51 @@ function App() {
             {status.pair_quality && status.pair_quality.tradeable === false && (
               <div
                 style={{
-                  marginTop: '1rem',
-                  padding: '0.75rem 1rem',
-                  borderRadius: '8px',
-                  background: 'rgba(248, 113, 113, 0.12)',
-                  border: '1px solid rgba(248, 113, 113, 0.35)',
-                  fontSize: '0.85rem',
-                  color: '#fecaca',
+                  marginTop: '1.25rem',
+                  padding: '1rem 1.25rem',
+                  borderRadius: '12px',
+                  background: 'linear-gradient(135deg, rgba(239,68,68,0.22) 0%, rgba(220,38,38,0.14) 100%)',
+                  border: '2px solid rgba(239,68,68,0.7)',
+                  boxShadow: '0 0 18px rgba(239,68,68,0.35), inset 0 1px 0 rgba(255,255,255,0.05)',
+                  textAlign: 'center',
                 }}
               >
-                <strong>Pair quality check failed</strong>
-                <p style={{ margin: '0.35rem 0 0', color: '#fca5a5' }}>
+                <div style={{ fontSize: '1.35rem', marginBottom: '0.3rem' }}>🚫</div>
+                <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#ff6b6b', letterSpacing: '0.02em', textTransform: 'uppercase' }}>
+                  Pair Quality Check Failed
+                </div>
+                <div style={{ margin: '0.45rem 0 0', fontSize: '0.85rem', color: '#fca5a5', lineHeight: 1.45 }}>
                   {status.pair_quality.reason || 'Market conditions failed quality gates.'}
-                </p>
+                </div>
                 {status.pair_quality.efficiency_ratio != null && (
-                  <p style={{ margin: '0.35rem 0 0', fontSize: '0.8rem', color: '#fcd34d' }}>
+                  <div style={{ marginTop: '0.55rem', fontSize: '0.78rem', color: '#fde68a', fontWeight: 600, letterSpacing: '0.01em' }}>
                     ER {status.pair_quality.efficiency_ratio} · slope {status.pair_quality.abs_slope}
-                    {status.auto_select_asset
-                      ? ' — auto-pick will try another pair'
-                      : ' — enable auto-pick or change pair'}
-                  </p>
+                    <span style={{ color: '#fb923c', marginLeft: '0.35rem' }}>
+                      {status.auto_select_asset ? '— auto-pick will try another pair' : '— enable auto-pick or change pair'}
+                    </span>
+                  </div>
                 )}
               </div>
             )}
             {status.pair_quality && status.pair_quality.tradeable === true && (
-              <p style={{ fontSize: '0.8rem', color: '#34d399', marginTop: '0.75rem' }}>
-                Pair OK · ER {status.pair_quality.efficiency_ratio} · slope {status.pair_quality.abs_slope}
-              </p>
+              <div
+                style={{
+                  marginTop: '1.25rem',
+                  padding: '0.75rem 1.25rem',
+                  borderRadius: '12px',
+                  background: 'linear-gradient(135deg, rgba(52,211,153,0.18) 0%, rgba(16,185,129,0.10) 100%)',
+                  border: '2px solid rgba(52,211,153,0.55)',
+                  boxShadow: '0 0 14px rgba(52,211,153,0.25)',
+                  textAlign: 'center',
+                }}
+              >
+                <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#34d399', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                  ✅ Pair OK
+                </div>
+                <div style={{ marginTop: '0.3rem', fontSize: '0.78rem', color: '#6ee7b7' }}>
+                  ER {status.pair_quality.efficiency_ratio} · slope {status.pair_quality.abs_slope}
+                </div>
+              </div>
             )}
             {status.learned_pattern?.loaded && (
               <p style={{ fontSize: '0.8rem', color: '#a78bfa', marginTop: '0.75rem' }}>
