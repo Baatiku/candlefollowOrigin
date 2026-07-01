@@ -5768,13 +5768,19 @@ class DoubleMartingaleBot:
 
                     if not call_ok and not put_ok:
                         logger.error(
-                            f"Trade REJECTED on {self.asset} — skipping this window."
+                            f"Trade REJECTED on {self.asset} — rescanning for available pair."
                         )
                         self._notify(
                             "Order rejected",
-                            f"Legs rejected on {self.asset} — skipping this candle.",
+                            f"Legs rejected on {self.asset} — trying another pair.",
                         )
-                        self._skip_to_next_entry_window("legs rejected")
+                        # Rejection is a platform-availability issue, not a quality issue.
+                        # Rescan immediately so the bot can try a different pair next window
+                        # rather than sitting out the full candle on the same blocked asset.
+                        if self.auto_select_asset:
+                            self._apply_auto_asset_selection(
+                                reason="rejection", relaxed=True
+                            )
                         continue
 
                     self.round_number += 1
