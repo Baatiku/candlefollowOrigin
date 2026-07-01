@@ -1518,10 +1518,17 @@ class DoubleMartingaleBot:
                 f"🔒 Mid-ladder lock — {self.asset} penalized (~{mins}m left) "
                 f"but staying on it (step {self.session_round_count + 1})"
             )
-            logger.info(
-                f"{self.asset} in penalty box (~{mins}m) but mid-ladder lock active "
-                f"(step {self.session_round_count + 1}) — continuing on same pair"
-            )
+            # Rate-limit to once per 30 s — this code runs inside the polling loop
+            # and would otherwise produce hundreds of identical log lines per second.
+            _pb_log_times = getattr(self, "_penalty_box_log_times", {})
+            _last_log = _pb_log_times.get(self.asset, 0)
+            if time.time() - _last_log >= 30:
+                logger.info(
+                    f"{self.asset} in penalty box (~{mins}m) but mid-ladder lock active "
+                    f"(step {self.session_round_count + 1}) — continuing on same pair"
+                )
+                _pb_log_times[self.asset] = time.time()
+                self._penalty_box_log_times = _pb_log_times
             return
         until = self.asset_penalty_box.get(self.asset)
         remaining = max(0.0, (until - datetime.datetime.utcnow()).total_seconds())
@@ -1989,6 +1996,7 @@ class DoubleMartingaleBot:
             "tradeable": tradeable,
             "efficiency_ratio": round(er, 3),
             "abs_slope": round(abs_slope, 1),
+            "slope_signed": round(normalized_slope, 1),
             "slope_atr_ratio": round(slope_atr_ratio, 3),
             "active_ratio": round(active_ratio, 2),
             "range_pct": round(range_pct * 100, 4),
@@ -2153,11 +2161,44 @@ class DoubleMartingaleBot:
                 scan_tradeable = base.get("tradeable")
                 chop_reason = base.get("chop_reason") or ""
                 result.update(base)
+                # Fix: re-assert candle direction AFTER update — _score_asset_movement
+                # does not return a direction key today, but if it ever does this
+                # prevents it from silently overriding the closed-candle direction.
+                result["direction"] = candle_dir
                 result["tradeable"] = True
                 result["reason"] = "Passed"
                 if chop_reason and not result.get("chop_advisory"):
                     result["chop_advisory"] = f"scan chop: {chop_reason}"
                 result["scan_would_skip"] = not scan_tradeable
+
+                # ── Slope-alignment guard ────────────────────────────────────────
+                # If the 15-candle regression slope is strongly directional AND
+                # disagrees with the single closed candle, trust the slope.
+                # Threshold defaults: slope ≥ 20 pips AND ER ≥ 0.45.
+                # This catches the "single green bounce candle inside a heavy
+                # downtrend" pattern that candle-color alone cannot see.
+                _sa_min_slope = float(getattr(app_config, "SLOPE_ALIGN_MIN_SLOPE", 20.0))
+                _sa_min_er = float(getattr(app_config, "SLOPE_ALIGN_MIN_ER", 0.45))
+                _slope_signed = base.get("slope_signed", 0.0)
+                _er = base.get("efficiency_ratio", 0.0)
+                _slope_dir = "call" if _slope_signed > 0 else "put"
+                if (
+                    abs(_slope_signed) >= _sa_min_slope
+                    and _er >= _sa_min_er
+                    and _slope_dir != candle_dir
+                ):
+                    logger.warning(
+                        f"⚠️ Slope-align override on {asset_name}: "
+                        f"candle={candle_dir.upper()} but slope={_slope_signed:.1f} "
+                        f"ER={_er:.3f} → using {_slope_dir.upper()} "
+                        f"(threshold slope≥{_sa_min_slope} ER≥{_sa_min_er})"
+                    )
+                    result["direction"] = _slope_dir
+                    result["candle_dir_overridden"] = True
+                    result["slope_override_reason"] = (
+                        f"slope={_slope_signed:.1f} er={_er:.3f} "
+                        f"overrides candle={candle_dir.upper()}"
+                    )
             else:
                 result.update({
                     "straddle_score": 0.0,
@@ -2167,9 +2208,15 @@ class DoubleMartingaleBot:
                 })
             
             chop_note = f" | {result['chop_advisory']}" if result.get("chop_advisory") else ""
+            final_dir = result.get("direction", candle_dir)
+            override_note = (
+                f" → SLOPE-OVERRIDE→{final_dir.upper()}"
+                if result.get("candle_dir_overridden") else ""
+            )
             logger.info(
                 f"Candle Follow {asset_name}: last closed {result['candle_color'].upper()}→"
-                f"{candle_dir.upper()}, ADX {adx_value:.1f}, Alts: {alternations}/{lookback - 1}{chop_note}"
+                f"{candle_dir.upper()}{override_note}, ADX {adx_value:.1f}, "
+                f"Alts: {alternations}/{lookback - 1}{chop_note}"
             )
             return result
         except Exception as e:
@@ -2982,14 +3029,11 @@ class DoubleMartingaleBot:
             ema = float(val) * k + ema * (1.0 - k)
         return ema
 
-    def _determine_trend_direction(self, last_direction=None):
+    def _determine_trend_direction_UNUSED(self, last_direction=None):
         """
-        Evaluate trend parameters to output 'call' or 'put'.
-        If last_direction is provided, we check for a true trend reversal:
-        1. Slope flipped signs and exceeds opposite threshold.
-        2. Momentum acceleration is validated (short-term ATR vs medium-term ATR ratio >= 1.2).
-        3. Price has breached the EMA15 by at least 1.2 * ATR in the new direction.
-        If all criteria are met -> swap direction. Otherwise -> keep last_direction (correction).
+        DEAD CODE — never called. Retained for reference only; do not reconnect.
+        Direction is now determined exclusively by _evaluate_candle_follow (closed-candle
+        color + slope-alignment guard). All EMA/ATR/reversal logic below is orphaned.
         """
         with self._price_lock:
             prices = self._price_data.get(60, [])
@@ -3872,11 +3916,12 @@ class DoubleMartingaleBot:
         self._asset_flip_blocked.pop(asset, None)
         return False
 
-    def _check_and_apply_slope_flip_block(
+    def _check_and_apply_slope_flip_block_UNUSED(
         self, asset: str, med_slope: float, short_slope: float
     ) -> bool:
         """
-        Slope-flip hard block rule (London analysis, 2026-06).
+        DEAD CODE — never called. Retained for reference only; do not reconnect.
+        Original: slope-flip hard block rule (London analysis, 2026-06).
         Condition: abs(short_slope) > 1.5 × abs(med_slope) AND opposite signs.
         When true the market has already reversed against the entry direction —
         block the asset for 20 minutes regardless of ER.
