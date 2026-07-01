@@ -793,6 +793,25 @@ function App() {
                 <span className="stat-value">{status.wins} / {status.losses}</span>
               </div>
             </div>
+            {status.running && status.status_note && (
+              <div
+                style={{
+                  marginTop: '1rem',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '8px',
+                  background: 'rgba(251, 191, 36, 0.10)',
+                  border: '1px solid rgba(251, 191, 36, 0.35)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.6rem',
+                }}
+              >
+                <span style={{ fontSize: '1.05rem', lineHeight: 1 }}>🤖</span>
+                <strong style={{ color: '#fbbf24', fontSize: '0.9rem', fontWeight: 700 }}>
+                  {status.status_note}
+                </strong>
+              </div>
+            )}
             {status.pair_quality && status.pair_quality.tradeable === false && (
               <div
                 style={{

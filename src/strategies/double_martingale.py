@@ -276,6 +276,7 @@ class DoubleMartingaleBot:
         )
         self.last_stop_reason = ""
         self.last_error = ""
+        self.status_note = ""
         self.ai_error_msg = ""
         self._ai_fail_count = 0
         self.last_bet_breakdown = {}
@@ -1579,6 +1580,10 @@ class DoubleMartingaleBot:
             until = self.asset_penalty_box.get(self.asset)
             remaining = max(0.0, (until - datetime.datetime.utcnow()).total_seconds())
             mins = max(1, int(remaining / 60))
+            self.status_note = (
+                f"🔒 Mid-ladder lock — {self.asset} penalized (~{mins}m left) "
+                f"but staying on it (step {self.session_round_count + 1})"
+            )
             logger.info(
                 f"{self.asset} in penalty box (~{mins}m) but mid-ladder lock active "
                 f"(step {self.session_round_count + 1}) — continuing on same pair"
@@ -1588,6 +1593,7 @@ class DoubleMartingaleBot:
         remaining = max(0.0, (until - datetime.datetime.utcnow()).total_seconds())
         mins = max(1, int(remaining / 60))
         penalized = self.asset
+        self.status_note = f"🚫 {penalized} penalized (~{mins}m left) — scanning for another pair"
         logger.warning(
             f"{penalized} in penalty box (~{mins}m left) — not trading this pair"
         )
@@ -2185,6 +2191,11 @@ class DoubleMartingaleBot:
                     min_efficiency_ratio=self.chop_min_er,
                 )
                 if chop["choppy"]:
+                    self.status_note = (
+                        f"🌊 {asset_name}: choppy market — "
+                        f"CI={chop['choppiness_index']} ({'ER' if chop['er_flag'] else 'CI'} triggered) "
+                        f"ER={chop['efficiency_ratio_recent']} — skipping this candle"
+                    )
                     logger.info(
                         f"⏭️ Skipping {asset_name}: choppy market "
                         f"(CI={chop['choppiness_index']}, ER={chop['efficiency_ratio_recent']})"
@@ -2785,6 +2796,8 @@ class DoubleMartingaleBot:
         return False
 
     def _abandon_untradeable_pair(self, reason):
+        label = (reason or "quality gate").replace("_", " ")
+        self.status_note = f"🔍 Abandoning {self.asset} ({label}) — scanning for a better pair"
         self._apply_pair_penalty(PAIR_UNTRADEABLE_COOLDOWN_MINUTES, reason)
         self._pair_filter_skip_streak[self.asset] = 0
         if self.auto_select_asset:
@@ -2849,6 +2862,12 @@ class DoubleMartingaleBot:
 
         streak = self._pair_filter_skip_streak.get(self.asset, 0) + 1
         self._pair_filter_skip_streak[self.asset] = streak
+        label = (reason or "quality gate").replace("_", " ")
+        self.status_note = (
+            f"⚠️ {self.asset} skipped: {label} "
+            f"({streak}/{PAIR_UNTRADEABLE_SKIP_STREAK} — "
+            f"{'pair will be abandoned next' if streak >= PAIR_UNTRADEABLE_SKIP_STREAK - 1 else 'waiting for conditions to improve'})"
+        )
         logger.warning(
             f"{self.asset} unsuitable ({reason}) — "
             f"{streak}/{PAIR_UNTRADEABLE_SKIP_STREAK} before pair pause"
@@ -4663,12 +4682,15 @@ class DoubleMartingaleBot:
         wait = max(1.0, (tf - seconds_past) + self.entry_window_start)
         tier = self.current_tier_index + 1
         step = self.session_round_count + 1
+        label = reason.replace("_", " ").replace("-", " ")
+        self.status_note = f"⏳ Waiting {wait:.0f}s for next candle — {label}"
         logger.info(
             f"Still Tier {tier} step {step}/{self.session_max_rounds} — "
             f"skip ({reason}). Next candle boundary in {wait:.1f}s..."
         )
         if not self._interruptible_sleep(wait):
             return
+        self.status_note = ""
 
     def _passes_volatility_filters(self, call_info, put_info, check_momentum=True):
         """Delegates to unified straddle suitability (same rules as pair ranking)."""
@@ -4933,6 +4955,10 @@ class DoubleMartingaleBot:
             minutes=TIER_EXHAUSTION_COOLDOWN_MINUTES
         )
         pause_mins = TIER_EXHAUSTION_COOLDOWN_MINUTES
+        self.status_note = (
+            f"⏰ Tier {self.assigned_tier_index + 1} exhausted — "
+            f"cooling down {pause_mins}m before escalating to Tier {self.assigned_tier_index + 2}"
+        )
         logger.warning(
             f"Tier exhaustion cooldown — {pause_mins}m pause before escalating "
             f"from Tier {self.assigned_tier_index + 1} to Tier {self.assigned_tier_index + 2}"
@@ -6272,6 +6298,7 @@ class DoubleMartingaleBot:
                 if time.time() < until
             },
             "asset_scores": self.asset_scores,
+            "status_note": self.status_note,
             "asset_selection_note": self.last_asset_selection_note,
             "active_pair_baseline": getattr(self, "_active_pair_baseline", {}) or {},
             "pair_consecutive_losses": int(
