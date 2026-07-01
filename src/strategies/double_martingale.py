@@ -2665,8 +2665,8 @@ class DoubleMartingaleBot:
             return
 
         # STRICT CANDLE FOLLOW: Never switch pairs mid-ladder.
-        # Exception: penalty box and step-4 retry must always be able to switch.
-        _mid_ladder_bypass = {"trading start", "step 4 rotation retry", "penalty box"}
+        # Exception: penalty box, quality-gate escape, and step-4 retry must always switch.
+        _mid_ladder_bypass = {"trading start", "step 4 rotation retry", "penalty box", "quality escape"}
         if self._in_active_ladder() and reason not in _mid_ladder_bypass:
             logger.info(f"🔒 Locked to {self.asset} for the entire tier (step {self.session_round_count+1}).")
             return
@@ -2713,7 +2713,7 @@ class DoubleMartingaleBot:
         logger.info(self.last_asset_selection_note)
 
     def _switch_to_next_tradeable_pair(self, reason, relaxed=False):
-        _switch_bypass = {"step 4 rotation retry", "penalty box"}
+        _switch_bypass = {"step 4 rotation retry", "penalty box", "quality escape"}
         if self._in_active_ladder() and reason not in _switch_bypass:
             logger.info(
                 f"Mid-ladder lock — cannot switch from {self.asset} "
@@ -2746,17 +2746,17 @@ class DoubleMartingaleBot:
     def _abandon_untradeable_pair(self, reason):
         label = (reason or "quality gate").replace("_", " ")
         self.status_note = f"🔍 Abandoning {self.asset} ({label}) — scanning for a better pair"
-        self._apply_pair_penalty(PAIR_UNTRADEABLE_COOLDOWN_MINUTES, reason)
+        # No penalty applied — quality/chop failures do NOT penalise the pair.
+        # Only two consecutive full-ladder exhaustions within 15 min trigger the penalty box.
+        prior_asset = self.asset
         self._pair_filter_skip_streak[self.asset] = 0
         if self.auto_select_asset:
-            # Use "penalty box" as the switch reason when mid-ladder so the mid-ladder
-            # lock is bypassed — the pair is penalized, so switching is correct behaviour.
-            switch_reason = "penalty box" if self._in_active_ladder() else reason
-            self._apply_auto_asset_selection(reason=switch_reason, relaxed=True)
-            if not self._is_asset_penalty_blocked():
+            # "quality escape" bypasses the mid-ladder lock so we switch immediately.
+            self._apply_auto_asset_selection(reason="quality escape", relaxed=True)
+            if self.asset != prior_asset:
                 self._wait_for_price_data()
                 return
-            if self._switch_to_next_tradeable_pair(switch_reason, relaxed=True):
+            if self._switch_to_next_tradeable_pair("quality escape", relaxed=True):
                 self._wait_for_price_data()
                 return
         else:
@@ -3373,10 +3373,8 @@ class DoubleMartingaleBot:
                 if not for_entry_timing:
                     logger.warning(
                         f"{self.trading_mode.capitalize()} profit for {self.asset} is {profit_pct:.1f}% "
-                        f"(< {MIN_PROFIT}%) — asset may be unavailable as {self.trading_mode} option. "
-                        f"Penalizing for 15m."
+                        f"(< {MIN_PROFIT}%) — asset may be unavailable as {self.trading_mode} option. Skipping."
                     )
-                    self._apply_pair_penalty(15, f"unavailable as {self.trading_mode} option")
                 return None
 
             return {
@@ -5193,16 +5191,9 @@ class DoubleMartingaleBot:
                     f"Not applying exhaustion handling."
                 )
             else:
-                penalty_mins = _clamp_penalty_minutes(TIER_EXHAUSTED_PENALTY_MINUTES)
-                penalty_until = datetime.datetime.utcnow() + datetime.timedelta(
-                    minutes=penalty_mins
-                )
-                self.asset_penalty_box[self.asset] = penalty_until
-                logger.warning(
-                    f"PENALTY BOX: All steps lost on Tier {old_tier + 1} — "
-                    f"{self.asset} blacklisted {penalty_mins}m "
-                    f"(until {penalty_until.strftime('%H:%M')} UTC)."
-                )
+                # Penalty box is managed solely by _record_ladder_exhaustion_and_check_penalty
+                # (called just before _finalize_session). A pair is only blacklisted if it
+                # exhausts the full ladder ≥2 times within 15 minutes — not on every exhaustion.
                 self._start_tier_exhaustion_cooldown()
                 if old_tier == self.assigned_tier_index:
                     hard_stop = self._maybe_escalate_assigned_tier_after_exhaustion()
@@ -5213,16 +5204,17 @@ class DoubleMartingaleBot:
                     )
                     self.current_tier_index = self.assigned_tier_index
                     self.session_round_count = 0
+                cooldown_mins = TIER_EXHAUSTION_COOLDOWN_MINUTES
                 logger.warning(
                     f"💀 TIER {old_tier + 1} EXHAUSTED — ALL STEPS LOST! "
-                    f"Cooldown {penalty_mins}m, then "
+                    f"Cooldown {cooldown_mins}m, then "
                     f"{'STOP' if hard_stop else f'retry Tier {self.assigned_tier_index + 1} step 1'} "
                     f"| Debt: ${self.cumulative_debt:.2f}"
                 )
                 self._notify(
                     "Tier exhausted",
                     f"Tier {old_tier + 1} all steps lost. "
-                    f"{penalty_mins}m cooldown, then "
+                    f"{cooldown_mins}m cooldown, then "
                     f"{'hard stop' if hard_stop else f'Tier {self.assigned_tier_index + 1} step 1'}. "
                     f"Debt ${self.cumulative_debt:.2f}",
                 )
@@ -5779,22 +5771,13 @@ class DoubleMartingaleBot:
                             self._round_in_flight = False
 
                     if not call_ok and not put_ok:
-                        reject_mins = _clamp_penalty_minutes(ORDER_REJECTION_PENALTY_MINUTES)
                         logger.error(
-                            f"Trade REJECTED on {self.asset}. "
-                            f"Penalizing pair for {reject_mins} minutes."
-                        )
-                        self._apply_pair_penalty(
-                            ORDER_REJECTION_PENALTY_MINUTES, "legs rejected"
+                            f"Trade REJECTED on {self.asset} — skipping this window."
                         )
                         self._notify(
                             "Order rejected",
-                            f"Legs rejected on {self.asset} — pair penalized.",
+                            f"Legs rejected on {self.asset} — skipping this candle.",
                         )
-                        if self.auto_select_asset:
-                            self._apply_auto_asset_selection(
-                                reason="rejection penalty", relaxed=True
-                            )
                         self._skip_to_next_entry_window("legs rejected")
                         continue
 
