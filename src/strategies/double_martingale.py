@@ -2649,6 +2649,10 @@ class DoubleMartingaleBot:
             "tier exhausted penalty",
             "recovery debt chipping",
             "pair performance degradation",
+            # After every win the bot must rescan — "trading start" is that trigger.
+            # Hot-pair loyalty must not suppress it; the scan may still land back on
+            # the same pair if it genuinely ranks highest.
+            "trading start",
         }
         if (
             self._hot_pair
@@ -2665,8 +2669,8 @@ class DoubleMartingaleBot:
             return
 
         # STRICT CANDLE FOLLOW: Never switch pairs mid-ladder.
-        # Exception: penalty box, quality-gate escape, and step-4 retry must always switch.
-        _mid_ladder_bypass = {"trading start", "step 4 rotation retry", "penalty box", "quality escape"}
+        # Exception: penalty box (sliding-window loss rule) and step-4 retry must switch.
+        _mid_ladder_bypass = {"trading start", "step 4 rotation retry", "penalty box"}
         if self._in_active_ladder() and reason not in _mid_ladder_bypass:
             logger.info(f"🔒 Locked to {self.asset} for the entire tier (step {self.session_round_count+1}).")
             return
@@ -2713,7 +2717,7 @@ class DoubleMartingaleBot:
         logger.info(self.last_asset_selection_note)
 
     def _switch_to_next_tradeable_pair(self, reason, relaxed=False):
-        _switch_bypass = {"step 4 rotation retry", "penalty box", "quality escape"}
+        _switch_bypass = {"step 4 rotation retry", "penalty box"}
         if self._in_active_ladder() and reason not in _switch_bypass:
             logger.info(
                 f"Mid-ladder lock — cannot switch from {self.asset} "
@@ -2744,27 +2748,13 @@ class DoubleMartingaleBot:
         return False
 
     def _abandon_untradeable_pair(self, reason):
-        label = (reason or "quality gate").replace("_", " ")
-        self.status_note = f"🔍 Abandoning {self.asset} ({label}) — scanning for a better pair"
-        # No penalty applied — quality/chop failures do NOT penalise the pair.
-        # Only two consecutive full-ladder exhaustions within 15 min trigger the penalty box.
-        prior_asset = self.asset
-        self._pair_filter_skip_streak[self.asset] = 0
-        if self.auto_select_asset:
-            # "quality escape" bypasses the mid-ladder lock so we switch immediately.
-            self._apply_auto_asset_selection(reason="quality escape", relaxed=True)
-            if self.asset != prior_asset:
-                self._wait_for_price_data()
-                return
-            if self._switch_to_next_tradeable_pair("quality escape", relaxed=True):
-                self._wait_for_price_data()
-                return
-        else:
-            self.last_asset_selection_note = (
-                f"{self.asset} unsuitable ({reason}). "
-                "Pick another pair or enable auto-select."
-            )
-            logger.warning(self.last_asset_selection_note)
+        # DEPRECATED — no longer called. Pair switching on quality failure was removed.
+        # Pairs are committed at ladder start and held until a win triggers a fresh scan.
+        # Kept to avoid breaking any persisted state or external references.
+        logger.warning(
+            f"_abandon_untradeable_pair called unexpectedly for {self.asset} ({reason}). "
+            "This path should not be reached — quality failures now wait, not switch."
+        )
 
     @staticmethod
     def _is_pair_condition_failure(reason):
@@ -2806,30 +2796,30 @@ class DoubleMartingaleBot:
         self._gate_rejection_log.appendleft(entry)
 
     def _handle_trade_gate_failure(self, reason):
-        """Chop/flat pairs: switch at step 1 or immediately mid-ladder; wait in manual mode."""
-        if not self._is_pair_condition_failure(reason):
-            self._skip_to_next_entry_window(reason)
-            return
+        """Pair committed — wait for conditions to improve, never switch mid-recovery.
 
+        Pair switching happens only after a WIN (at the next 'trading start' rescan).
+        If conditions are choppy or flat on the committed pair, wait for the next
+        candle rather than abandoning it. The pair was already vetted by the initial
+        scan before the ladder started.
+        """
         label = (reason or "quality gate").replace("_", " ")
-        logger.warning(f"{self.asset} unsuitable ({reason}) — abandoning pair")
+        self.status_note = f"⏳ {self.asset}: {label} — waiting for conditions to improve"
 
         if not self.auto_select_asset:
-            self.status_note = f"⚠️ {self.asset}: {label}. Change pair or enable auto-select."
-            self.last_asset_selection_note = self.status_note
+            self.last_asset_selection_note = (
+                f"{self.asset}: {label}. Change pair or enable auto-select."
+            )
             logger.warning(self.last_asset_selection_note)
             if not self._interruptible_sleep(90):
                 return
             return
 
-        # Step 1: no trades placed yet — switch immediately.
-        # Step 2+: also switch immediately — waiting N candles on a clearly-bad pair
-        # costs more time than switching now. Penalty box ensures a 5-min cooling period.
-        self.status_note = f"🔍 Abandoning {self.asset} ({label}) — scanning for another pair"
-        self._pair_filter_skip_streak[self.asset] = 0
-        self._abandon_untradeable_pair(reason)
-        if not self._interruptible_sleep(3):
-            return
+        logger.warning(
+            f"{self.asset} unsuitable ({reason}) at step {self.session_round_count + 1} "
+            f"— waiting for next candle (pair switch happens after a win)"
+        )
+        self._skip_to_next_entry_window(reason)
 
     def _ensure_tradeable_market(self):
         """Called only at step 1 — safe to auto-select since no trades are in play."""
@@ -5491,8 +5481,8 @@ class DoubleMartingaleBot:
                             )
                             if self.current_tier_index >= len(self.budget_tiers):
                                 self.current_tier_index = len(self.budget_tiers) - 1
-                            if self.session_round_count == 0:
-                                self._apply_auto_asset_selection(reason="trading start")
+                            # Pair rescan is handled by the session_round_count==0
+                            # block below — no duplicate call needed here.
                             preview = self._compute_round_bet(balance=current_balance)
                             logger.info(f"\n{'='*50}")
                             logger.info(
@@ -5512,12 +5502,18 @@ class DoubleMartingaleBot:
                         continue
 
                     if self.session_round_count == 0:
-                        # After a T2/T4 debt-chip win the recovery flag is set —
-                        # rescan for the best asset NOW, before _on_ladder_step_start
-                        # locks ladder_pair to whatever asset we're currently on.
-                        if self._pending_recovery_rescan and self.auto_select_asset:
-                            self._pending_recovery_rescan = False
-                            self._apply_auto_asset_selection(reason="recovery debt chipping")
+                        # Every new ladder start (after a win OR tier exhaustion reset)
+                        # gets a fresh pair scan. This is the sole mechanism for switching
+                        # pairs: we scan here, commit, then hold through any losses until
+                        # the next win brings us back to step 0 and rescans again.
+                        if self.auto_select_asset:
+                            # Debt-chip recovery rescan takes priority (specific override);
+                            # otherwise run the standard post-win / new-ladder rescan.
+                            if self._pending_recovery_rescan:
+                                self._pending_recovery_rescan = False
+                                self._apply_auto_asset_selection(reason="recovery debt chipping")
+                            else:
+                                self._apply_auto_asset_selection(reason="trading start")
                         self._on_ladder_step_start()
                         if not self._ensure_tradeable_market():
                             wait_sec = 90 if not self.auto_select_asset else 30
