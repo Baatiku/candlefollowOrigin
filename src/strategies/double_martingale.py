@@ -1453,12 +1453,12 @@ class DoubleMartingaleBot:
         """
         Track sequences that reached step 3 or deeper.
         After 2 such deep sequences on the same pair in one session,
-        apply a 4-hour penalty box so the bot moves on rather than
+        apply a short penalty so the bot rescans rather than
         repeatedly grinding a struggling pair.
         """
         DEEP_STEP_THRESHOLD = 3
         MAX_STRIKES = 2
-        PENALTY_HOURS = 4
+        PENALTY_MINUTES = 15
         if completed_step < DEEP_STEP_THRESHOLD:
             return
         asset = self.asset
@@ -1470,7 +1470,7 @@ class DoubleMartingaleBot:
         )
         if count >= MAX_STRIKES:
             penalty_until = datetime.datetime.utcnow() + datetime.timedelta(
-                hours=PENALTY_HOURS
+                minutes=PENALTY_MINUTES
             )
             self.asset_penalty_box[asset] = penalty_until
             logger.warning(
