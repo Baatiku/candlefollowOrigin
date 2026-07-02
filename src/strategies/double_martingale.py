@@ -55,24 +55,24 @@ DIGITAL_UNSUPPORTED_ASSETS = {
 # Each step of Tn recovers ALL prior tiers combined (T0..T(n-1)) in 3/2/1 wins at 85%.
 # Formula: target=L_cum+P; step1=target/(3×0.85); step2=(target+step1)/(2×0.85); step3=(target+step1+step2)/0.85
 # Tier is determined solely by current balance. On exhaustion: clear debt, reset to step 1.
-# ── 12-tier step table — ratio 1:4:10:23:55, each tier N = N × base ratios ──
+# ── 16-tier step table — ratio 1:4:10:23:55:100:230:500, each tier N = N × base ratios ──
 ALL_TIERS = [
-    [1,  4,   10,  23,  55 ],  # Tier 1  (index  0)
-    [2,  8,   20,  46,  110],  # Tier 2  (index  1)
-    [3,  12,  30,  69,  165],  # Tier 3  (index  2)
-    [4,  16,  40,  92,  220],  # Tier 4  (index  3)
-    [5,  20,  50,  115, 275],  # Tier 5  (index  4)
-    [6,  24,  60,  138, 330],  # Tier 6  (index  5)
-    [7,  28,  70,  161, 385],  # Tier 7  (index  6)
-    [8,  32,  80,  184, 440],  # Tier 8  (index  7)
-    [9,  36,  90,  207, 495],  # Tier 9  (index  8)
-    [10, 40,  100, 230, 550],  # Tier 10 (index  9)
-    [11, 44,  110, 253, 605],  # Tier 11 (index 10)
-    [12, 48,  120, 276, 660],  # Tier 12 (index 11)
-    [13, 52,  130, 299, 715],  # Tier 13 (index 12)
-    [14, 56,  140, 322, 770],  # Tier 14 (index 13)
-    [15, 60,  150, 345, 825],  # Tier 15 (index 14)
-    [16, 64,  160, 368, 880],  # Tier 16 (index 15)
+    [1,  4,   10,  23,  55,  100,  230,  500 ],  # Tier 1  (index  0)
+    [2,  8,   20,  46,  110, 200,  460,  1000],  # Tier 2  (index  1)
+    [3,  12,  30,  69,  165, 300,  690,  1500],  # Tier 3  (index  2)
+    [4,  16,  40,  92,  220, 400,  920,  2000],  # Tier 4  (index  3)
+    [5,  20,  50,  115, 275, 500,  1150, 2500],  # Tier 5  (index  4)
+    [6,  24,  60,  138, 330, 600,  1380, 3000],  # Tier 6  (index  5)
+    [7,  28,  70,  161, 385, 700,  1610, 3500],  # Tier 7  (index  6)
+    [8,  32,  80,  184, 440, 800,  1840, 4000],  # Tier 8  (index  7)
+    [9,  36,  90,  207, 495, 900,  2070, 4500],  # Tier 9  (index  8)
+    [10, 40,  100, 230, 550, 1000, 2300, 5000],  # Tier 10 (index  9)
+    [11, 44,  110, 253, 605, 1100, 2530, 5500],  # Tier 11 (index 10)
+    [12, 48,  120, 276, 660, 1200, 2760, 6000],  # Tier 12 (index 11)
+    [13, 52,  130, 299, 715, 1300, 2990, 6500],  # Tier 13 (index 12)
+    [14, 56,  140, 322, 770, 1400, 3220, 7000],  # Tier 14 (index 13)
+    [15, 60,  150, 345, 825, 1500, 3450, 7500],  # Tier 15 (index 14)
+    [16, 64,  160, 368, 880, 1600, 3680, 8000],  # Tier 16 (index 15)
 ]
 
 # Independent copy for API compatibility — NOT an alias of ALL_TIERS so mutations
@@ -153,7 +153,7 @@ TIER_SECOND_EXHAUSTION_COOLDOWN_MINUTES = 5
 TIER_FAILURES_BEFORE_ESCALATE = 1
 TIER_1_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
 TIER_HIGHER_FAILURES_BEFORE_ESCALATE = TIER_FAILURES_BEFORE_ESCALATE
-LADDER_MAX_STEP_INDEX = 4       # 0-based; 5 steps per tier
+LADDER_MAX_STEP_INDEX = 7       # 0-based; 8 steps per tier
 RECOVERY_TIER_CEILING = 15     # max tier index (Tier 16)
 # No separate reserve tiers — recovery uses a dedicated higher tier.
 ROUND_RESERVE_TIERS = set()   # empty
@@ -435,7 +435,7 @@ class DoubleMartingaleBot:
         self._hot_pair: str = ""
         self._hot_pair_consecutive_wins: int = 0
         self._pending_recovery_rescan: bool = False  # set after recovery-tier win to force fresh scan at next S1
-        # Recovery mode: after a full 5-step ladder loss the bot waits 5 min then
+        # Recovery mode: after a full 8-step ladder loss the bot waits 5 min then
         # trades on the balance-band's recovery tier until balance ≥ _pre_loss_balance.
         # _recovery_level: 0=not in recovery, 1=first recovery, 2=second recovery
         self._in_recovery_mode: bool = False
@@ -5167,7 +5167,7 @@ class DoubleMartingaleBot:
 
     def _maybe_escalate_assigned_tier_after_exhaustion(self):
         """
-        After a full 5-step ladder loss: switch to whichever recovery tier
+        After a full 8-step ladder loss: switch to whichever recovery tier
         _start_tier_exhaustion_cooldown() determined.
 
         Returns True (hard stop) when no recovery tier is available
@@ -5199,7 +5199,7 @@ class DoubleMartingaleBot:
         label  = f"{'2nd-r' if level == 2 else 'R'}ecovery"
         ladder = self.budget_tiers[recovery_idx]
         logger.warning(
-            f"💀 Full 5-step loss → {label} Tier {recovery_idx + 1} "
+            f"💀 Full 8-step loss → {label} Tier {recovery_idx + 1} "
             f"[{', '.join(f'${x:.0f}' for x in ladder)}] "
             f"(target balance ≥ ${getattr(self, '_pre_loss_balance', 0.0):.2f})"
         )
@@ -5213,11 +5213,11 @@ class DoubleMartingaleBot:
 
     def _apply_win_ladder_rules(self):
         """
-        Win ladder rules (5-step flat ladder, default/recovery two-tier system):
+        Win ladder rules (8-step flat ladder, default/recovery two-tier system):
 
         ANY win → reset to S1 of the CURRENT tier (steps never advance on a win).
 
-        Recovery mode (entered after a full 5-step loss):
+        Recovery mode (entered after a full 8-step loss):
           • Check whether balance ≥ _pre_loss_balance.
           • YES → recovery complete; return to default tier for the current balance band.
           • NO  → stay on recovery tier S1 and keep accumulating wins.

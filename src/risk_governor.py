@@ -134,7 +134,8 @@ def compute_risk_limits(
     risk_tier_cap = max(0, ceiling - int(risk_mode_tier_delta))
     if not drawdown_breaker_enabled:
         risk_active = False
-    max_step_index = 4  # 0-based; normal step 5
+    from strategies.double_martingale import LADDER_MAX_STEP_INDEX
+    max_step_index = LADDER_MAX_STEP_INDEX  # 0-based; derived from ladder definition
 
     return {
         "balance": bal,

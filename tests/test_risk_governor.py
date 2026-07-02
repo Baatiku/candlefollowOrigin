@@ -46,7 +46,7 @@ class TestRiskGovernor(unittest.TestCase):
             drawdown_recovery_pct=0.10,
         )
         self.assertFalse(limits["risk_mode"])
-        self.assertEqual(limits["max_step_index"], 4)
+        self.assertEqual(limits["max_step_index"], 7)  # 0-based; 8 steps per tier
 
     def test_tradable_balance_used_for_ceiling(self):
         limits = compute_risk_limits(
