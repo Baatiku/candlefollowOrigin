@@ -418,6 +418,11 @@ class DoubleMartingaleBot:
         self._graceful_stop = False
         self.manual_stop_requested = False
         self._market_feed_active = False
+        # Watchdog: updated every main-loop iteration so a freeze (e.g. hung
+        # WebSocket reconnect) is detected and the process is force-exited so
+        # the host (Railway/Replit) auto-restarts it cleanly.
+        self._loop_heartbeat: float = time.time()
+        self._watchdog_timeout: int = 240  # seconds — 4 minutes
 
         self._enforce_standard_budget_tiers()
         self._init_evaluation_window_state()
@@ -5361,10 +5366,40 @@ class DoubleMartingaleBot:
             except Exception as e:
                 logger.debug(f"Failed to start initial mood stream: {e}")
 
+        # ── Watchdog thread ───────────────────────────────────────────────────
+        # The IQ Option WebSocket can silently die and the library's reconnect
+        # call blocks indefinitely (observed 50+ minute freezes in Railway logs).
+        # This daemon thread force-exits the process if the main loop stops
+        # beating for more than _watchdog_timeout seconds so the host auto-
+        # restarts the container and reconnects cleanly.
+        def _watchdog():
+            while self.running:
+                time.sleep(60)
+                if not self.running:
+                    break
+                stale = time.time() - self._loop_heartbeat
+                if stale > self._watchdog_timeout:
+                    logger.critical(
+                        f"🐕 WATCHDOG: main loop frozen {stale:.0f}s "
+                        f"(limit {self._watchdog_timeout}s) — forcing restart"
+                    )
+                    self._notify(
+                        "Bot watchdog restart",
+                        f"Loop frozen {stale:.0f}s — process restarting now",
+                    )
+                    os._exit(1)
+
+        _wd = threading.Thread(target=_watchdog, name="bot-watchdog", daemon=True)
+        _wd.start()
+        # ─────────────────────────────────────────────────────────────────────
+
         try:
             while self.running:
                 try:
+                    self._loop_heartbeat = time.time()  # watchdog pulse
+
                     while self.paused and self.running:
+                        self._loop_heartbeat = time.time()
                         if not self._interruptible_sleep(2):
                             break
 
