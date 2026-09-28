@@ -89,6 +89,24 @@ def _fetch_payload_text(rel_path):
 
 
 def _restore_payload():
+    env_manifest = os.environ.get("OMNILIVE_ENV_MANIFEST_JSON")
+    if env_manifest:
+        payload = json.loads(env_manifest)
+        root = Path(tempfile.mkdtemp(prefix="omnilive-src-"))
+        for item in payload["files"]:
+            path = item["path"]
+            value = os.environ.get(item["env"])
+            if value is None:
+                raise RuntimeError(f"missing Render secret for {path}")
+            plain = bytes.fromhex(value)
+            actual = _git_blob_sha(plain)
+            if actual != item["git_sha1"]:
+                raise RuntimeError(f"secret payload integrity failure for {path}")
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(plain)
+        return root
+
     payload = json.loads(_fetch_payload_text("payload.json"))
     root = Path(tempfile.mkdtemp(prefix="omnilive-src-"))
     for item in payload["files"]:
