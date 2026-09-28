@@ -22,19 +22,19 @@ PAYLOAD_PATH = APP_DIR / "payload.json"
 PAYLOAD_BASE_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin/omnilive-build-bridge/omnilive-build-bridge/"
 ARTIFACT_PATH = Path("/tmp/omnilive-debug.apk")
 
-CONTROL_TOKEN = os.environ["BRIDGE_TOKEN"]
-PAYLOAD_KEY = bytes.fromhex(os.environ["PAYLOAD_KEY_HEX"])
-SSH_KEY = paramiko.RSAKey.from_private_key(
-    io.StringIO(base64.b64decode(os.environ["SSH_PRIVATE_KEY_B64"]).decode())
-)
-SSH_PUBLIC_TEXT = f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge-v2"
+CONTROL_TOKEN = secrets.token_urlsafe(32)
+PAYLOAD_KEY_HEX = os.environ.get("PAYLOAD_KEY_HEX", "")
+PAYLOAD_KEY = bytes.fromhex(PAYLOAD_KEY_HEX) if PAYLOAD_KEY_HEX else None
+SSH_KEY = paramiko.RSAKey.generate(3072)
+SSH_PUBLIC_TEXT = f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge"
+print(f"OMNILIVE_BRIDGE_TOKEN={CONTROL_TOKEN}", flush=True)
 print(f"OMNILIVE_SSH_PUBLIC_KEY={SSH_PUBLIC_TEXT}", flush=True)
 
 app = Flask(__name__)
 _lock = threading.Lock()
 _state = {
     "status": "idle",
-    "message": "ready; stable credentials loaded",
+    "message": "ready; ephemeral relay credentials loaded",
     "started_at": None,
     "finished_at": None,
     "host": None,
@@ -268,11 +268,11 @@ def _poll_commands():
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="omnilive-build-bridge", activated=True, stable_credentials=True)
+    return jsonify(ok=True, service="omnilive-build-bridge", env_payload=bool(os.environ.get("OMNILIVE_ENV_MANIFEST_JSON")))
 
 @app.get("/bootstrap")
 def bootstrap():
-    return jsonify(ssh_public_key=SSH_PUBLIC_TEXT, stable_credentials=True)
+    return jsonify(ssh_public_key=SSH_PUBLIC_TEXT, stable_credentials=False)
 
 @app.get("/build")
 def build():
