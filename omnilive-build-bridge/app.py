@@ -1,5 +1,5 @@
+import base64
 import hashlib
-import io
 import ipaddress
 import json
 import os
@@ -11,20 +11,26 @@ import time
 from pathlib import Path
 
 import paramiko
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from flask import Flask, jsonify, request, send_file
 
 APP_DIR = Path(__file__).resolve().parent
 PAYLOAD_PATH = APP_DIR / "payload.json"
-TOKEN = os.environ["BRIDGE_TOKEN"]
-PAYLOAD_KEY = bytes.fromhex(os.environ["PAYLOAD_KEY_HEX"])
-SSH_PRIVATE_KEY = os.environ["SSH_PRIVATE_KEY_B64"]
 ARTIFACT_PATH = Path("/tmp/omnilive-debug.apk")
+
+CONTROL_TOKEN = secrets.token_urlsafe(32)
+SSH_KEY = paramiko.RSAKey.generate(3072)
+ENVELOPE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+PAYLOAD_KEY = None
+
+print(f"OMNILIVE_BRIDGE_TOKEN={CONTROL_TOKEN}", flush=True)
 
 app = Flask(__name__)
 _lock = threading.Lock()
 _state = {
     "status": "idle",
-    "message": "ready",
+    "message": "ready; payload key not activated",
     "started_at": None,
     "finished_at": None,
     "host": None,
@@ -34,7 +40,7 @@ _state = {
 
 def _auth():
     supplied = request.args.get("token", "")
-    return secrets.compare_digest(supplied, TOKEN)
+    return secrets.compare_digest(supplied, CONTROL_TOKEN)
 
 def _append_log(text):
     with _lock:
@@ -54,8 +60,8 @@ def _xtea_block(v0, v1, key_words):
     return v0, v1
 
 def _decrypt(ciphertext, file_index):
-    if len(PAYLOAD_KEY) != 16:
-        raise RuntimeError("PAYLOAD_KEY_HEX must decode to 16 bytes")
+    if PAYLOAD_KEY is None or len(PAYLOAD_KEY) != 16:
+        raise RuntimeError("payload key is not activated")
     key_words = [int.from_bytes(PAYLOAD_KEY[i:i+4], "big") for i in range(0, 16, 4)]
     out = bytearray(len(ciphertext))
     for block_index in range((len(ciphertext) + 7) // 8):
@@ -77,7 +83,10 @@ def _restore_payload():
     for item in payload["files"]:
         path = item["path"]
         idx = int(item["index"])
-        if "ciphertext_hex" in item:\n            encrypted = bytes.fromhex(item["ciphertext_hex"])\n        else:\n            encrypted = bytes.fromhex((APP_DIR / item["ciphertext_file"]).read_text().strip())
+        if "ciphertext_hex" in item:
+            encrypted = bytes.fromhex(item["ciphertext_hex"])
+        else:
+            encrypted = bytes.fromhex((APP_DIR / item["ciphertext_file"]).read_text().strip())
         plain = _decrypt(encrypted, idx)
         actual = _git_blob_sha(plain)
         if actual != item["git_sha1"]:
@@ -86,11 +95,6 @@ def _restore_payload():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(plain)
     return root
-
-def _load_key():
-    import base64
-    text = base64.b64decode(SSH_PRIVATE_KEY).decode()
-    return paramiko.Ed25519Key.from_private_key(io.StringIO(text))
 
 def _run(client, command, timeout=3600):
     _append_log(f"\n$ {command}\n")
@@ -156,14 +160,14 @@ def _build(host):
         client.connect(
             hostname=host,
             username="root",
-            pkey=_load_key(),
+            pkey=SSH_KEY,
             timeout=30,
             banner_timeout=30,
             auth_timeout=30,
         )
 
         with _lock:
-            _state.update(status="uploading", message="uploading encrypted-restored source to DigitalOcean")
+            _state.update(status="uploading", message="uploading restored source to DigitalOcean")
 
         remote_root = "/root/omnilive-build"
         _run(client, f"rm -rf {remote_root} && mkdir -p {remote_root}", timeout=120)
@@ -190,12 +194,7 @@ def _build(host):
 
         digest = hashlib.sha256(ARTIFACT_PATH.read_bytes()).hexdigest()
         with _lock:
-            _state.update(
-                status="ready",
-                message="APK ready",
-                finished_at=time.time(),
-                sha256=digest,
-            )
+            _state.update(status="ready", message="APK ready", finished_at=time.time(), sha256=digest)
     except Exception as exc:
         _append_log(f"\nERROR: {exc}\n")
         with _lock:
@@ -208,12 +207,47 @@ def _build(host):
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="omnilive-build-bridge")
+    return jsonify(ok=True, service="omnilive-build-bridge", activated=PAYLOAD_KEY is not None)
+
+@app.get("/bootstrap")
+def bootstrap():
+    envelope_public = ENVELOPE_KEY.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    return jsonify(
+        ssh_public_key=f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge",
+        envelope_public_key_pem=envelope_public,
+    )
+
+@app.get("/activate")
+def activate():
+    global PAYLOAD_KEY
+    if not _auth():
+        return jsonify(error="unauthorized"), 401
+    wrapped = request.args.get("wrapped_key", "")
+    try:
+        padded = wrapped + "=" * (-len(wrapped) % 4)
+        encrypted = base64.urlsafe_b64decode(padded.encode())
+        key = ENVELOPE_KEY.decrypt(
+            encrypted,
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+        )
+        if len(key) != 16:
+            raise ValueError("invalid key length")
+        PAYLOAD_KEY = key
+        with _lock:
+            _state.update(status="idle", message="payload key activated")
+        return jsonify(ok=True)
+    except Exception as exc:
+        return jsonify(error=f"activation failed: {exc}"), 400
 
 @app.get("/build")
 def build():
     if not _auth():
         return jsonify(error="unauthorized"), 401
+    if PAYLOAD_KEY is None:
+        return jsonify(error="payload key not activated"), 409
     host = request.args.get("host", "")
     try:
         ipaddress.ip_address(host)
@@ -225,15 +259,7 @@ def build():
             return jsonify(_state), 409
         if ARTIFACT_PATH.exists():
             ARTIFACT_PATH.unlink()
-        _state.update(
-            status="queued",
-            message="build queued",
-            started_at=time.time(),
-            finished_at=None,
-            host=host,
-            sha256=None,
-            log="",
-        )
+        _state.update(status="queued", message="build queued", started_at=time.time(), finished_at=None, host=host, sha256=None, log="")
     threading.Thread(target=_build, args=(host,), daemon=True).start()
     return jsonify(status="queued", host=host), 202
 
@@ -252,13 +278,4 @@ def artifact():
         ready = _state["status"] == "ready"
     if not ready or not ARTIFACT_PATH.exists():
         return jsonify(error="artifact not ready"), 404
-    return send_file(
-        ARTIFACT_PATH,
-        mimetype="application/vnd.android.package-archive",
-        as_attachment=True,
-        download_name="omnilive-debug.apk",
-    )
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    return send_file(ARTIFACT_PATH, mimetype="application/vnd.android.package-archive", as_attachment=True, download_name="omnilive-debug.apk")
