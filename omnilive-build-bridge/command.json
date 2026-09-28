@@ -1,5 +1,7 @@
 {
   "version": 1,
-  "command_id": null,
-  "action": null
+  "command_id": "omnilive-apk-20260928-0835",
+  "action": "build",
+  "host": "159.203.160.22",
+  "wrapped_key": "mpSTRc56bYpggVTEfOECppBzQj8dsHjWaaLYwAHLNBoaOz86qNsVVkM77x4d3MMsSxlEs4dyX0z6YsWa_ty7Z-oBQz5p5W4k4udJH6o9oNnCvLCS_YAmfcSqAwZ7DJj6alADl2MKpWHFXwuJQB86XcsvFcLDMcE04qCELmZahPcNPa1RvFG2y2tkAq2Vvrxyeh1IbwaXDLpPTGNogr1BvYkB_BZI4yNT0Q8OpI6LByDid_HMk5jfaz20zKcJSi4idpo9Oke0M4U5Adjt3N59yzdSSTpyAecshR0U2U6ZO3g-TL6RH0iErk8m0S9pAPmwr3l6CS6dQdrqZyiqic7kiN-hZxGcFjqAbqyqcB9eQFvYBhNc04Zf-GlnS0re0b9ct2uxe3wCgSQfnrYplJL4yd5QsmoxfB9tmQUxUYqg2q1b4yzNpKEYLqa3XcUwv6RKqbSZLuFhscvXugFbFMpZZCymEONDKdQLhPy6jT-2CedriKTXFPE6Ip3byEK6JbED"
 }
