@@ -169,8 +169,9 @@
     {
       "index": 28,
       "path": "ops/apk-builder.Dockerfile",
-      "git_sha1": "b7e2028faa3e797d7726c0b0bd05fada7ab43bcb",
-      "ciphertext_file": "payload/028.xtea.hex"
+      "git_sha1": "4bb0d056c709ea8b566701db545bcf9acaa76159",
+      "ciphertext_file": "payload/028.xtea.hex",
+      "transient_build_patch": "android.useAndroidX=true"
     },
     {
       "index": 29,
