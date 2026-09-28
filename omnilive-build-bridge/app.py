@@ -18,6 +18,7 @@ from flask import Flask, jsonify, request, send_file
 
 APP_DIR = Path(__file__).resolve().parent
 PAYLOAD_PATH = APP_DIR / "payload.json"
+PAYLOAD_BASE_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin/omnilive-build-bridge/omnilive-build-bridge/"
 ARTIFACT_PATH = Path("/tmp/omnilive-debug.apk")
 
 CONTROL_TOKEN = secrets.token_urlsafe(32)
@@ -86,8 +87,14 @@ def _git_blob_sha(data):
     prefix = f"blob {len(data)}\0".encode()
     return hashlib.sha1(prefix + data).hexdigest()
 
+def _fetch_payload_text(rel_path):
+    url = f"{PAYLOAD_BASE_URL}{rel_path}?t={time.time_ns()}"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        return response.read().decode()
+
+
 def _restore_payload():
-    payload = json.loads(PAYLOAD_PATH.read_text())
+    payload = json.loads(_fetch_payload_text("payload.json"))
     root = Path(tempfile.mkdtemp(prefix="omnilive-src-"))
     for item in payload["files"]:
         path = item["path"]
@@ -95,7 +102,7 @@ def _restore_payload():
         if "ciphertext_hex" in item:
             encrypted = bytes.fromhex(item["ciphertext_hex"])
         else:
-            encrypted = bytes.fromhex((APP_DIR / item["ciphertext_file"]).read_text().strip())
+            encrypted = bytes.fromhex(_fetch_payload_text(item["ciphertext_file"]).strip())
         plain = _decrypt(encrypted, idx)
         actual = _git_blob_sha(plain)
         if actual != item["git_sha1"]:
