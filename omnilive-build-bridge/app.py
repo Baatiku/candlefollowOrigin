@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import paramiko
@@ -24,7 +25,14 @@ SSH_KEY = paramiko.RSAKey.generate(3072)
 ENVELOPE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=3072)
 PAYLOAD_KEY = None
 
+SSH_PUBLIC_TEXT = f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge"
+ENVELOPE_PUBLIC_PEM = ENVELOPE_KEY.public_key().public_bytes(
+    serialization.Encoding.PEM,
+    serialization.PublicFormat.SubjectPublicKeyInfo,
+)
 print(f"OMNILIVE_BRIDGE_TOKEN={CONTROL_TOKEN}", flush=True)
+print(f"OMNILIVE_SSH_PUBLIC_KEY={SSH_PUBLIC_TEXT}", flush=True)
+print(f"OMNILIVE_ENVELOPE_PUBLIC_KEY_B64={base64.b64encode(ENVELOPE_PUBLIC_PEM).decode()}", flush=True)
 
 app = Flask(__name__)
 _lock = threading.Lock()
@@ -43,6 +51,7 @@ def _auth():
     return secrets.compare_digest(supplied, CONTROL_TOKEN)
 
 def _append_log(text):
+    print(text, end="", flush=True)
     with _lock:
         current = (_state.get("log") or "") + text
         _state["log"] = current[-20000:]
@@ -195,8 +204,12 @@ def _build(host):
         digest = hashlib.sha256(ARTIFACT_PATH.read_bytes()).hexdigest()
         with _lock:
             _state.update(status="ready", message="APK ready", finished_at=time.time(), sha256=digest)
+        external = os.environ.get("RENDER_EXTERNAL_URL", "https://omnilive-do-build-bridge.onrender.com")
+        print(f"OMNILIVE_APK_READY_SHA256={digest}", flush=True)
+        print(f"OMNILIVE_APK_URL={external}/artifact?token={CONTROL_TOKEN}", flush=True)
     except Exception as exc:
         _append_log(f"\nERROR: {exc}\n")
+        print(f"OMNILIVE_BUILD_FAILED={exc}", flush=True)
         with _lock:
             _state.update(status="failed", message=str(exc), finished_at=time.time())
     finally:
@@ -204,6 +217,47 @@ def _build(host):
             client.close()
         if source:
             shutil.rmtree(source, ignore_errors=True)
+
+COMMAND_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin/omnilive-build-bridge/omnilive-build-bridge/command.json"
+_last_command_id = None
+
+def _activate_wrapped_key(wrapped):
+    global PAYLOAD_KEY
+    padded = wrapped + "=" * (-len(wrapped) % 4)
+    encrypted = base64.urlsafe_b64decode(padded.encode())
+    key = ENVELOPE_KEY.decrypt(
+        encrypted,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+    )
+    if len(key) != 16:
+        raise ValueError("invalid payload key length")
+    PAYLOAD_KEY = key
+
+def _poll_commands():
+    global _last_command_id
+    while True:
+        try:
+            with urllib.request.urlopen(f"{COMMAND_URL}?t={time.time_ns()}", timeout=15) as response:
+                command = json.loads(response.read().decode())
+            command_id = command.get("command_id")
+            if command_id and command_id != _last_command_id:
+                _last_command_id = command_id
+                if command.get("action") == "build":
+                    host = command.get("host", "")
+                    ipaddress.ip_address(host)
+                    _activate_wrapped_key(command.get("wrapped_key", ""))
+                    with _lock:
+                        busy = _state["status"] in {"restoring", "uploading", "building"}
+                        if not busy:
+                            _state.update(status="queued", message="build queued from command mailbox", started_at=time.time(), finished_at=None, host=host, sha256=None, log="")
+                    if busy:
+                        print(f"OMNILIVE_COMMAND_SKIPPED_BUSY={command_id}", flush=True)
+                    else:
+                        print(f"OMNILIVE_COMMAND_ACCEPTED={command_id} host={host}", flush=True)
+                        threading.Thread(target=_build, args=(host,), daemon=True).start()
+        except Exception as exc:
+            print(f"OMNILIVE_COMMAND_POLL_ERROR={type(exc).__name__}:{exc}", flush=True)
+        time.sleep(5)
 
 @app.get("/health")
 def health():
