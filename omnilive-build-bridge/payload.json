@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "source_repo": "Baatiku/Cherie",
-  "source_commit": "775d823eaf621dc0b07c5d32dbcb13205eeb84e2",
+  "source_commit": "3378797c7d67758e1b411f05a2ae595de127b73c",
   "cipher": "XTEA-CTR",
   "files": [
     {
@@ -169,14 +169,13 @@
     {
       "index": 28,
       "path": "ops/apk-builder.Dockerfile",
-      "git_sha1": "4bb0d056c709ea8b566701db545bcf9acaa76159",
-      "ciphertext_file": "payload/028.xtea.hex",
-      "transient_build_patch": "android.useAndroidX=true"
+      "git_sha1": "b7e2028faa3e797d7726c0b0bd05fada7ab43bcb",
+      "ciphertext_file": "payload/028.xtea.hex"
     },
     {
       "index": 29,
-      "path": "ops/render-apk-build.sh",
-      "git_sha1": "0035c0e3c2be1c7ceb57369b2eee989afe538c56",
+      "path": "android/gradle.properties",
+      "git_sha1": "f53889cab83ec268a22ed2eb2d35550c8ef2fbdc",
       "ciphertext_file": "payload/029.xtea.hex"
     }
   ]
