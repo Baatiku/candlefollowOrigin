@@ -1,6 +1,5 @@
 import base64
 import hashlib
-import io
 import ipaddress
 import json
 import os
@@ -23,18 +22,24 @@ PAYLOAD_BASE_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin
 ARTIFACT_PATH = Path("/tmp/omnilive-debug.apk")
 
 CONTROL_TOKEN = secrets.token_urlsafe(32)
-PAYLOAD_KEY_HEX = os.environ.get("PAYLOAD_KEY_HEX", "")
-PAYLOAD_KEY = bytes.fromhex(PAYLOAD_KEY_HEX) if PAYLOAD_KEY_HEX else None
 SSH_KEY = paramiko.RSAKey.generate(3072)
+ENVELOPE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+PAYLOAD_KEY = None
+
 SSH_PUBLIC_TEXT = f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge"
+ENVELOPE_PUBLIC_PEM = ENVELOPE_KEY.public_key().public_bytes(
+    serialization.Encoding.PEM,
+    serialization.PublicFormat.SubjectPublicKeyInfo,
+)
 print(f"OMNILIVE_BRIDGE_TOKEN={CONTROL_TOKEN}", flush=True)
 print(f"OMNILIVE_SSH_PUBLIC_KEY={SSH_PUBLIC_TEXT}", flush=True)
+print(f"OMNILIVE_ENVELOPE_PUBLIC_KEY_B64={base64.b64encode(ENVELOPE_PUBLIC_PEM).decode()}", flush=True)
 
 app = Flask(__name__)
 _lock = threading.Lock()
 _state = {
     "status": "idle",
-    "message": "ready; ephemeral relay credentials loaded",
+    "message": "ready; payload key not activated",
     "started_at": None,
     "finished_at": None,
     "host": None,
@@ -89,24 +94,6 @@ def _fetch_payload_text(rel_path):
 
 
 def _restore_payload():
-    env_manifest = os.environ.get("OMNILIVE_ENV_MANIFEST_JSON")
-    if env_manifest:
-        payload = json.loads(env_manifest)
-        root = Path(tempfile.mkdtemp(prefix="omnilive-src-"))
-        for item in payload["files"]:
-            path = item["path"]
-            value = os.environ.get(item["env"])
-            if value is None:
-                raise RuntimeError(f"missing Render secret for {path}")
-            plain = bytes.fromhex(value)
-            actual = _git_blob_sha(plain)
-            if actual != item["git_sha1"]:
-                raise RuntimeError(f"secret payload integrity failure for {path}")
-            target = root / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(plain)
-        return root
-
     payload = json.loads(_fetch_payload_text("payload.json"))
     root = Path(tempfile.mkdtemp(prefix="omnilive-src-"))
     for item in payload["files"]:
@@ -241,6 +228,18 @@ def _build(host):
 COMMAND_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin/omnilive-build-bridge/omnilive-build-bridge/command.json"
 _last_command_id = None
 
+def _activate_wrapped_key(wrapped):
+    global PAYLOAD_KEY
+    padded = wrapped + "=" * (-len(wrapped) % 4)
+    encrypted = base64.urlsafe_b64decode(padded.encode())
+    key = ENVELOPE_KEY.decrypt(
+        encrypted,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+    )
+    if len(key) != 16:
+        raise ValueError("invalid payload key length")
+    PAYLOAD_KEY = key
+
 def _poll_commands():
     global _last_command_id
     while True:
@@ -253,6 +252,7 @@ def _poll_commands():
                 if command.get("action") == "build":
                     host = command.get("host", "")
                     ipaddress.ip_address(host)
+                    _activate_wrapped_key(command.get("wrapped_key", ""))
                     with _lock:
                         busy = _state["status"] in {"restoring", "uploading", "building"}
                         if not busy:
@@ -268,16 +268,47 @@ def _poll_commands():
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="omnilive-build-bridge", env_payload=bool(os.environ.get("OMNILIVE_ENV_MANIFEST_JSON")))
+    return jsonify(ok=True, service="omnilive-build-bridge", activated=PAYLOAD_KEY is not None)
 
 @app.get("/bootstrap")
 def bootstrap():
-    return jsonify(ssh_public_key=SSH_PUBLIC_TEXT, stable_credentials=False)
+    envelope_public = ENVELOPE_KEY.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    return jsonify(
+        ssh_public_key=f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge",
+        envelope_public_key_pem=envelope_public,
+    )
+
+@app.get("/activate")
+def activate():
+    global PAYLOAD_KEY
+    if not _auth():
+        return jsonify(error="unauthorized"), 401
+    wrapped = request.args.get("wrapped_key", "")
+    try:
+        padded = wrapped + "=" * (-len(wrapped) % 4)
+        encrypted = base64.urlsafe_b64decode(padded.encode())
+        key = ENVELOPE_KEY.decrypt(
+            encrypted,
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+        )
+        if len(key) != 16:
+            raise ValueError("invalid key length")
+        PAYLOAD_KEY = key
+        with _lock:
+            _state.update(status="idle", message="payload key activated")
+        return jsonify(ok=True)
+    except Exception as exc:
+        return jsonify(error=f"activation failed: {exc}"), 400
 
 @app.get("/build")
 def build():
     if not _auth():
         return jsonify(error="unauthorized"), 401
+    if PAYLOAD_KEY is None:
+        return jsonify(error="payload key not activated"), 409
     host = request.args.get("host", "")
     try:
         ipaddress.ip_address(host)
