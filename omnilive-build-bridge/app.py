@@ -77,7 +77,7 @@ def _restore_payload():
     for item in payload["files"]:
         path = item["path"]
         idx = int(item["index"])
-        encrypted = bytes.fromhex(item["ciphertext_hex"])
+        if "ciphertext_hex" in item:\n            encrypted = bytes.fromhex(item["ciphertext_hex"])\n        else:\n            encrypted = bytes.fromhex((APP_DIR / item["ciphertext_file"]).read_text().strip())
         plain = _decrypt(encrypted, idx)
         actual = _git_blob_sha(plain)
         if actual != item["git_sha1"]:
