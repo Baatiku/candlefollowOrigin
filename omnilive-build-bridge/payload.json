@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "source_repo": "Baatiku/Cherie",
+  "source_commit": "775d823eaf621dc0b07c5d32dbcb13205eeb84e2",
+  "cipher": "XTEA-CTR",
+  "files": [
+    {
+      "index": 1,
+      "path": "android/app/build.gradle.kts",
+      "git_sha1": "9b3d3a396c26d833c85fe23b175fc4e5a004145b",
+      "ciphertext_file": "payload/001.xtea.hex"
+    },
+    {
+      "index": 2,
+      "path": "android/app/src/main/AndroidManifest.xml",
+      "git_sha1": "cca27434f342b8b67d296e9fb793833333e450df",
+      "ciphertext_file": "payload/002.xtea.hex"
+    },
+    {
+      "index": 3,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/MainActivity.kt",
+      "git_sha1": "6ee7480b6634be1912e90e204375d3580cb2441c",
+      "ciphertext_file": "payload/003.xtea.hex"
+    },
+    {
+      "index": 4,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/net/SessionApi.kt",
+      "git_sha1": "4f69bdcb0493f047e1bb20f3efe2aa016184a6e4",
+      "ciphertext_file": "payload/004.xtea.hex"
+    },
+    {
+      "index": 5,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/AdaptiveQualityController.kt",
+      "git_sha1": "f83a3b68515f9054075e1128f84c4ff541cd1a83",
+      "ciphertext_file": "payload/005.xtea.hex"
+    },
+    {
+      "index": 6,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/CameraController.kt",
+      "git_sha1": "5d1f62e5644bd8b1bde00f67e5c1b315d50500dc",
+      "ciphertext_file": "payload/006.xtea.hex"
+    },
+    {
+      "index": 7,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/DeviceHealthMonitor.kt",
+      "git_sha1": "19a739e5f495a3f1932b81897107dbd6e3b3f660",
+      "ciphertext_file": "payload/007.xtea.hex"
+    },
+    {
+      "index": 8,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/FrameAgeGate.kt",
+      "git_sha1": "ad0d7992bed0dff5128a6484d38db037228597ed",
+      "ciphertext_file": "payload/008.xtea.hex"
+    },
+    {
+      "index": 9,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/FrameLatencyTracker.kt",
+      "git_sha1": "b14b71802e3e8a06a65a00312638242ba92641d1",
+      "ciphertext_file": "payload/009.xtea.hex"
+    },
+    {
+      "index": 10,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/LiveStreamService.kt",
+      "git_sha1": "961444b87e81a85b1736c0c4fe172a20f92aa7dc",
+      "ciphertext_file": "payload/010.xtea.hex"
+    },
+    {
+      "index": 11,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/LiveTelemetry.kt",
+      "git_sha1": "52fd24343093c42e077c869484676c01af54e683",
+      "ciphertext_file": "payload/011.xtea.hex"
+    },
+    {
+      "index": 12,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/ProcessedFrameOutput.kt",
+      "git_sha1": "ba241b25232b16d8474624b5d79101e460fb64fb",
+      "ciphertext_file": "payload/012.xtea.hex"
+    },
+    {
+      "index": 13,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/QualityProfile.kt",
+      "git_sha1": "d53a587884745d76786c3d32f98aa0ca812ab25d",
+      "ciphertext_file": "payload/013.xtea.hex"
+    },
+    {
+      "index": 14,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/ReferenceImageStore.kt",
+      "git_sha1": "116f16a23a5589fe6ddea766ed9c79adbe7bb265",
+      "ciphertext_file": "payload/014.xtea.hex"
+    },
+    {
+      "index": 15,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/ReturnedVideoBus.kt",
+      "git_sha1": "b6a8bd49a3bc8c8b4f08cb31d3c6ab137170769a",
+      "ciphertext_file": "payload/015.xtea.hex"
+    },
+    {
+      "index": 16,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/SurfaceFrameOutput.kt",
+      "git_sha1": "1cc4884a922abe1efdf9d187581ffd8f64304484",
+      "ciphertext_file": "payload/016.xtea.hex"
+    },
+    {
+      "index": 17,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/stream/WebRtcClient.kt",
+      "git_sha1": "e20a8f394c4a8ce37e6ffd46bf51da73ac23b7bc",
+      "ciphertext_file": "payload/017.xtea.hex"
+    },
+    {
+      "index": 18,
+      "path": "android/app/src/main/java/com/baatiku/omnilive/ui/ReturnedVideoView.kt",
+      "git_sha1": "162bb54b8fa949ca5d72b80ace1de840f9ef371e",
+      "ciphertext_file": "payload/018.xtea.hex"
+    },
+    {
+      "index": 19,
+      "path": "android/app/src/main/res/values/styles.xml",
+      "git_sha1": "9678d4ca3c09f4905245d2c5a180c77dd5aa9558",
+      "ciphertext_file": "payload/019.xtea.hex"
+    },
+    {
+      "index": 20,
+      "path": "android/app/src/rootlab/java/com/baatiku/omnilive/rootlabbridge/RootLabProcessedFrameBridge.kt",
+      "git_sha1": "d34134f14f394db4e5406353e51453f72a85c243",
+      "ciphertext_file": "payload/020.xtea.hex"
+    },
+    {
+      "index": 21,
+      "path": "android/app/src/test/java/com/baatiku/omnilive/stream/ReferenceUploadPayloadTest.kt",
+      "git_sha1": "4f2da18e05401808b0785a3f78a8db790053b6b9",
+      "ciphertext_file": "payload/021.xtea.hex"
+    },
+    {
+      "index": 22,
+      "path": "android/build.gradle.kts",
+      "git_sha1": "a53cec4c3df899728ce1c2ebc83d062926548288",
+      "ciphertext_file": "payload/022.xtea.hex"
+    },
+    {
+      "index": 23,
+      "path": "android/rootlab/build.gradle.kts",
+      "git_sha1": "746f06ed1aa5fe8fce77167511c37ed19232ed6e",
+      "ciphertext_file": "payload/023.xtea.hex"
+    },
+    {
+      "index": 24,
+      "path": "android/rootlab/src/main/java/com/baatiku/omnilive/rootlab/CompatibilitySessionController.kt",
+      "git_sha1": "48aac7230edb6b136528fbb5117874b698f6a7fa",
+      "ciphertext_file": "payload/024.xtea.hex"
+    },
+    {
+      "index": 25,
+      "path": "android/rootlab/src/main/java/com/baatiku/omnilive/rootlab/RootLabContracts.kt",
+      "git_sha1": "11feb5273056f52758433c0959f153be13882df6",
+      "ciphertext_file": "payload/025.xtea.hex"
+    },
+    {
+      "index": 26,
+      "path": "android/rootlab/src/test/java/com/baatiku/omnilive/rootlab/CompatibilitySessionControllerTest.kt",
+      "git_sha1": "e7b81f84e69c00f61a29161446cf27430aa43913",
+      "ciphertext_file": "payload/026.xtea.hex"
+    },
+    {
+      "index": 27,
+      "path": "android/settings.gradle.kts",
+      "git_sha1": "d30ffdcfdff1816388cc1ce8ecc0796250ed49fa",
+      "ciphertext_file": "payload/027.xtea.hex"
+    },
+    {
+      "index": 28,
+      "path": "ops/apk-builder.Dockerfile",
+      "git_sha1": "b7e2028faa3e797d7726c0b0bd05fada7ab43bcb",
+      "ciphertext_file": "payload/028.xtea.hex"
+    },
+    {
+      "index": 29,
+      "path": "ops/render-apk-build.sh",
+      "git_sha1": "0035c0e3c2be1c7ceb57369b2eee989afe538c56",
+      "ciphertext_file": "payload/029.xtea.hex"
+    }
+  ]
+}
