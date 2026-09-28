@@ -204,7 +204,7 @@ def _build(host):
 
         _run(client, "command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io)", timeout=900)
         _run(client, "systemctl start docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1 || true", timeout=120)
-        _run(client, f"cd {remote_root} && docker build --progress=plain -f ops/apk-builder.Dockerfile -t omnilive-apk .", timeout=3600)
+        _run(client, f"cd {remote_root} && docker build -f ops/apk-builder.Dockerfile -t omnilive-apk .", timeout=3600)
         _run(client, "docker rm -f omnilive-extract >/dev/null 2>&1 || true; docker create --name omnilive-extract omnilive-apk >/dev/null", timeout=120)
         _run(client, "docker cp omnilive-extract:/srv/omnilive-debug.apk /root/omnilive-debug.apk && docker rm -f omnilive-extract >/dev/null", timeout=120)
 
