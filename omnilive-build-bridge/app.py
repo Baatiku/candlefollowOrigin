@@ -333,3 +333,7 @@ def artifact():
     if not ready or not ARTIFACT_PATH.exists():
         return jsonify(error="artifact not ready"), 404
     return send_file(ARTIFACT_PATH, mimetype="application/vnd.android.package-archive", as_attachment=True, download_name="omnilive-debug.apk")
+
+
+# Start the GitHub command mailbox poller when Gunicorn imports this module.
+threading.Thread(target=_poll_commands, daemon=True).start()
