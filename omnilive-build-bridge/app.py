@@ -1,0 +1,264 @@
+import hashlib
+import io
+import ipaddress
+import json
+import os
+import secrets
+import shutil
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import paramiko
+from flask import Flask, jsonify, request, send_file
+
+APP_DIR = Path(__file__).resolve().parent
+PAYLOAD_PATH = APP_DIR / "payload.json"
+TOKEN = os.environ["BRIDGE_TOKEN"]
+PAYLOAD_KEY = bytes.fromhex(os.environ["PAYLOAD_KEY_HEX"])
+SSH_PRIVATE_KEY = os.environ["SSH_PRIVATE_KEY_B64"]
+ARTIFACT_PATH = Path("/tmp/omnilive-debug.apk")
+
+app = Flask(__name__)
+_lock = threading.Lock()
+_state = {
+    "status": "idle",
+    "message": "ready",
+    "started_at": None,
+    "finished_at": None,
+    "host": None,
+    "sha256": None,
+    "log": "",
+}
+
+def _auth():
+    supplied = request.args.get("token", "")
+    return secrets.compare_digest(supplied, TOKEN)
+
+def _append_log(text):
+    with _lock:
+        current = (_state.get("log") or "") + text
+        _state["log"] = current[-20000:]
+
+def _xtea_block(v0, v1, key_words):
+    delta = 0x9E3779B9
+    total = 0
+    mask = 0xFFFFFFFF
+    for _ in range(32):
+        mix = ((((v1 << 4) & mask) ^ (v1 >> 5)) + v1) & mask
+        v0 = (v0 + (mix ^ ((total + key_words[total & 3]) & mask))) & mask
+        total = (total + delta) & mask
+        mix = ((((v0 << 4) & mask) ^ (v0 >> 5)) + v0) & mask
+        v1 = (v1 + (mix ^ ((total + key_words[(total >> 11) & 3]) & mask))) & mask
+    return v0, v1
+
+def _decrypt(ciphertext, file_index):
+    if len(PAYLOAD_KEY) != 16:
+        raise RuntimeError("PAYLOAD_KEY_HEX must decode to 16 bytes")
+    key_words = [int.from_bytes(PAYLOAD_KEY[i:i+4], "big") for i in range(0, 16, 4)]
+    out = bytearray(len(ciphertext))
+    for block_index in range((len(ciphertext) + 7) // 8):
+        v0, v1 = _xtea_block(file_index & 0xFFFFFFFF, block_index & 0xFFFFFFFF, key_words)
+        stream = v0.to_bytes(4, "big") + v1.to_bytes(4, "big")
+        start = block_index * 8
+        chunk = ciphertext[start:start+8]
+        for j, b in enumerate(chunk):
+            out[start+j] = b ^ stream[j]
+    return bytes(out)
+
+def _git_blob_sha(data):
+    prefix = f"blob {len(data)}\0".encode()
+    return hashlib.sha1(prefix + data).hexdigest()
+
+def _restore_payload():
+    payload = json.loads(PAYLOAD_PATH.read_text())
+    root = Path(tempfile.mkdtemp(prefix="omnilive-src-"))
+    for item in payload["files"]:
+        path = item["path"]
+        idx = int(item["index"])
+        encrypted = bytes.fromhex(item["ciphertext_hex"])
+        plain = _decrypt(encrypted, idx)
+        actual = _git_blob_sha(plain)
+        if actual != item["git_sha1"]:
+            raise RuntimeError(f"payload integrity failure for {path}")
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(plain)
+    return root
+
+def _load_key():
+    import base64
+    text = base64.b64decode(SSH_PRIVATE_KEY).decode()
+    return paramiko.Ed25519Key.from_private_key(io.StringIO(text))
+
+def _run(client, command, timeout=3600):
+    _append_log(f"\n$ {command}\n")
+    stdin, stdout, stderr = client.exec_command(command, timeout=timeout, get_pty=True)
+    channel = stdout.channel
+    chunks = []
+    while not channel.exit_status_ready():
+        if channel.recv_ready():
+            data = channel.recv(65536).decode(errors="replace")
+            chunks.append(data)
+            _append_log(data)
+        if channel.recv_stderr_ready():
+            data = channel.recv_stderr(65536).decode(errors="replace")
+            chunks.append(data)
+            _append_log(data)
+        time.sleep(0.25)
+    while channel.recv_ready():
+        data = channel.recv(65536).decode(errors="replace")
+        chunks.append(data)
+        _append_log(data)
+    while channel.recv_stderr_ready():
+        data = channel.recv_stderr(65536).decode(errors="replace")
+        chunks.append(data)
+        _append_log(data)
+    status = channel.recv_exit_status()
+    output = "".join(chunks)
+    if status != 0:
+        raise RuntimeError(f"remote command failed ({status}): {command}\n{output[-5000:]}")
+    return output
+
+def _mkdirs(sftp, remote_dir):
+    parts = []
+    current = remote_dir
+    while current not in ("", "/"):
+        parts.append(current)
+        current = current.rsplit("/", 1)[0] or "/"
+    for path in reversed(parts):
+        try:
+            sftp.stat(path)
+        except IOError:
+            sftp.mkdir(path)
+
+def _upload_tree(sftp, local_root, remote_root):
+    for path in local_root.rglob("*"):
+        rel = path.relative_to(local_root).as_posix()
+        remote = f"{remote_root}/{rel}"
+        if path.is_dir():
+            _mkdirs(sftp, remote)
+        else:
+            _mkdirs(sftp, remote.rsplit("/", 1)[0])
+            sftp.put(str(path), remote)
+
+def _build(host):
+    source = None
+    client = None
+    try:
+        with _lock:
+            _state.update(status="restoring", message="decrypting private build payload", log="")
+        source = _restore_payload()
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=host,
+            username="root",
+            pkey=_load_key(),
+            timeout=30,
+            banner_timeout=30,
+            auth_timeout=30,
+        )
+
+        with _lock:
+            _state.update(status="uploading", message="uploading encrypted-restored source to DigitalOcean")
+
+        remote_root = "/root/omnilive-build"
+        _run(client, f"rm -rf {remote_root} && mkdir -p {remote_root}", timeout=120)
+        sftp = client.open_sftp()
+        try:
+            _upload_tree(sftp, source, remote_root)
+        finally:
+            sftp.close()
+
+        with _lock:
+            _state.update(status="building", message="running Android tests and APK build on DigitalOcean")
+
+        _run(client, "command -v docker >/dev/null 2>&1 || (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io)", timeout=900)
+        _run(client, "systemctl start docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1 || true", timeout=120)
+        _run(client, f"cd {remote_root} && docker build --progress=plain -f ops/apk-builder.Dockerfile -t omnilive-apk .", timeout=3600)
+        _run(client, "docker rm -f omnilive-extract >/dev/null 2>&1 || true; docker create --name omnilive-extract omnilive-apk >/dev/null", timeout=120)
+        _run(client, "docker cp omnilive-extract:/srv/omnilive-debug.apk /root/omnilive-debug.apk && docker rm -f omnilive-extract >/dev/null", timeout=120)
+
+        sftp = client.open_sftp()
+        try:
+            sftp.get("/root/omnilive-debug.apk", str(ARTIFACT_PATH))
+        finally:
+            sftp.close()
+
+        digest = hashlib.sha256(ARTIFACT_PATH.read_bytes()).hexdigest()
+        with _lock:
+            _state.update(
+                status="ready",
+                message="APK ready",
+                finished_at=time.time(),
+                sha256=digest,
+            )
+    except Exception as exc:
+        _append_log(f"\nERROR: {exc}\n")
+        with _lock:
+            _state.update(status="failed", message=str(exc), finished_at=time.time())
+    finally:
+        if client:
+            client.close()
+        if source:
+            shutil.rmtree(source, ignore_errors=True)
+
+@app.get("/health")
+def health():
+    return jsonify(ok=True, service="omnilive-build-bridge")
+
+@app.get("/build")
+def build():
+    if not _auth():
+        return jsonify(error="unauthorized"), 401
+    host = request.args.get("host", "")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return jsonify(error="invalid host"), 400
+
+    with _lock:
+        if _state["status"] in {"restoring", "uploading", "building"}:
+            return jsonify(_state), 409
+        if ARTIFACT_PATH.exists():
+            ARTIFACT_PATH.unlink()
+        _state.update(
+            status="queued",
+            message="build queued",
+            started_at=time.time(),
+            finished_at=None,
+            host=host,
+            sha256=None,
+            log="",
+        )
+    threading.Thread(target=_build, args=(host,), daemon=True).start()
+    return jsonify(status="queued", host=host), 202
+
+@app.get("/status")
+def status():
+    if not _auth():
+        return jsonify(error="unauthorized"), 401
+    with _lock:
+        return jsonify(dict(_state))
+
+@app.get("/artifact")
+def artifact():
+    if not _auth():
+        return jsonify(error="unauthorized"), 401
+    with _lock:
+        ready = _state["status"] == "ready"
+    if not ready or not ARTIFACT_PATH.exists():
+        return jsonify(error="artifact not ready"), 404
+    return send_file(
+        ARTIFACT_PATH,
+        mimetype="application/vnd.android.package-archive",
+        as_attachment=True,
+        download_name="omnilive-debug.apk",
+    )
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
