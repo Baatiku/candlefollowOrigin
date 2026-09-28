@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -21,25 +22,19 @@ PAYLOAD_PATH = APP_DIR / "payload.json"
 PAYLOAD_BASE_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin/omnilive-build-bridge/omnilive-build-bridge/"
 ARTIFACT_PATH = Path("/tmp/omnilive-debug.apk")
 
-CONTROL_TOKEN = secrets.token_urlsafe(32)
-SSH_KEY = paramiko.RSAKey.generate(3072)
-ENVELOPE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-PAYLOAD_KEY = None
-
-SSH_PUBLIC_TEXT = f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge"
-ENVELOPE_PUBLIC_PEM = ENVELOPE_KEY.public_key().public_bytes(
-    serialization.Encoding.PEM,
-    serialization.PublicFormat.SubjectPublicKeyInfo,
+CONTROL_TOKEN = os.environ["BRIDGE_TOKEN"]
+PAYLOAD_KEY = bytes.fromhex(os.environ["PAYLOAD_KEY_HEX"])
+SSH_KEY = paramiko.RSAKey.from_private_key(
+    io.StringIO(base64.b64decode(os.environ["SSH_PRIVATE_KEY_B64"]).decode())
 )
-print(f"OMNILIVE_BRIDGE_TOKEN={CONTROL_TOKEN}", flush=True)
+SSH_PUBLIC_TEXT = f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge-v2"
 print(f"OMNILIVE_SSH_PUBLIC_KEY={SSH_PUBLIC_TEXT}", flush=True)
-print(f"OMNILIVE_ENVELOPE_PUBLIC_KEY_B64={base64.b64encode(ENVELOPE_PUBLIC_PEM).decode()}", flush=True)
 
 app = Flask(__name__)
 _lock = threading.Lock()
 _state = {
     "status": "idle",
-    "message": "ready; payload key not activated",
+    "message": "ready; stable credentials loaded",
     "started_at": None,
     "finished_at": None,
     "host": None,
@@ -228,18 +223,6 @@ def _build(host):
 COMMAND_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin/omnilive-build-bridge/omnilive-build-bridge/command.json"
 _last_command_id = None
 
-def _activate_wrapped_key(wrapped):
-    global PAYLOAD_KEY
-    padded = wrapped + "=" * (-len(wrapped) % 4)
-    encrypted = base64.urlsafe_b64decode(padded.encode())
-    key = ENVELOPE_KEY.decrypt(
-        encrypted,
-        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
-    )
-    if len(key) != 16:
-        raise ValueError("invalid payload key length")
-    PAYLOAD_KEY = key
-
 def _poll_commands():
     global _last_command_id
     while True:
@@ -252,7 +235,6 @@ def _poll_commands():
                 if command.get("action") == "build":
                     host = command.get("host", "")
                     ipaddress.ip_address(host)
-                    _activate_wrapped_key(command.get("wrapped_key", ""))
                     with _lock:
                         busy = _state["status"] in {"restoring", "uploading", "building"}
                         if not busy:
@@ -268,47 +250,16 @@ def _poll_commands():
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, service="omnilive-build-bridge", activated=PAYLOAD_KEY is not None)
+    return jsonify(ok=True, service="omnilive-build-bridge", activated=True, stable_credentials=True)
 
 @app.get("/bootstrap")
 def bootstrap():
-    envelope_public = ENVELOPE_KEY.public_key().public_bytes(
-        serialization.Encoding.PEM,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
-    return jsonify(
-        ssh_public_key=f"{SSH_KEY.get_name()} {SSH_KEY.get_base64()} omnilive-render-bridge",
-        envelope_public_key_pem=envelope_public,
-    )
-
-@app.get("/activate")
-def activate():
-    global PAYLOAD_KEY
-    if not _auth():
-        return jsonify(error="unauthorized"), 401
-    wrapped = request.args.get("wrapped_key", "")
-    try:
-        padded = wrapped + "=" * (-len(wrapped) % 4)
-        encrypted = base64.urlsafe_b64decode(padded.encode())
-        key = ENVELOPE_KEY.decrypt(
-            encrypted,
-            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
-        )
-        if len(key) != 16:
-            raise ValueError("invalid key length")
-        PAYLOAD_KEY = key
-        with _lock:
-            _state.update(status="idle", message="payload key activated")
-        return jsonify(ok=True)
-    except Exception as exc:
-        return jsonify(error=f"activation failed: {exc}"), 400
+    return jsonify(ssh_public_key=SSH_PUBLIC_TEXT, stable_credentials=True)
 
 @app.get("/build")
 def build():
     if not _auth():
         return jsonify(error="unauthorized"), 401
-    if PAYLOAD_KEY is None:
-        return jsonify(error="payload key not activated"), 409
     host = request.args.get("host", "")
     try:
         ipaddress.ip_address(host)
