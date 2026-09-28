@@ -23,6 +23,7 @@ PAYLOAD_BASE_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin
 ARTIFACT_PATH = Path("/tmp/omnilive-debug.apk")
 
 CONTROL_TOKEN = os.environ["BRIDGE_TOKEN"]
+ARTIFACT_SHARE_TOKEN = os.environ.get("ARTIFACT_SHARE_TOKEN", "")
 PAYLOAD_KEY = bytes.fromhex(os.environ["PAYLOAD_KEY_HEX"])
 SSH_SEED = bytes.fromhex(os.environ["SSH_SEED_HEX"])
 if len(PAYLOAD_KEY) != 16:
@@ -231,6 +232,40 @@ def _build(host):
         if source:
             shutil.rmtree(source, ignore_errors=True)
 
+def _publish_existing_artifact(host):
+    client = None
+    try:
+        if not ARTIFACT_SHARE_TOKEN:
+            raise RuntimeError("artifact share token is not configured")
+        with _lock:
+            _state.update(status="publishing", message="retrieving existing APK from DigitalOcean", started_at=time.time(), finished_at=None, host=host, log="")
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=host,
+            username="root",
+            pkey=SSH_KEY,
+            timeout=30,
+            banner_timeout=30,
+            auth_timeout=30,
+        )
+        sftp = client.open_sftp()
+        try:
+            sftp.get("/root/omnilive-debug.apk", str(ARTIFACT_PATH))
+        finally:
+            sftp.close()
+        digest = hashlib.sha256(ARTIFACT_PATH.read_bytes()).hexdigest()
+        with _lock:
+            _state.update(status="ready", message="APK ready for artifact-only sharing", finished_at=time.time(), sha256=digest)
+        print(f"OMNILIVE_ARTIFACT_PUBLISHED_SHA256={digest}", flush=True)
+    except Exception as exc:
+        _append_log(f"\nERROR: {exc}\n")
+        with _lock:
+            _state.update(status="failed", message=str(exc), finished_at=time.time())
+    finally:
+        if client:
+            client.close()
+
 COMMAND_URL = "https://raw.githubusercontent.com/Baatiku/candlefollowOrigin/omnilive-build-bridge/omnilive-build-bridge/command.json"
 _last_command_id = None
 
@@ -243,18 +278,22 @@ def _poll_commands():
             command_id = command.get("command_id")
             if command_id and command_id != _last_command_id:
                 _last_command_id = command_id
-                if command.get("action") == "build":
+                action = command.get("action")
+                if action in {"build", "publish_artifact"}:
                     host = command.get("host", "")
                     ipaddress.ip_address(host)
                     with _lock:
-                        busy = _state["status"] in {"restoring", "uploading", "building"}
-                        if not busy:
+                        busy = _state["status"] in {"restoring", "uploading", "building", "publishing"}
+                        if action == "build" and not busy:
                             _state.update(status="queued", message="build queued from command mailbox", started_at=time.time(), finished_at=None, host=host, sha256=None, log="")
                     if busy:
                         print(f"OMNILIVE_COMMAND_SKIPPED_BUSY={command_id}", flush=True)
-                    else:
+                    elif action == "build":
                         print(f"OMNILIVE_COMMAND_ACCEPTED={command_id} host={host}", flush=True)
                         threading.Thread(target=_build, args=(host,), daemon=True).start()
+                    else:
+                        print(f"OMNILIVE_ARTIFACT_COMMAND_ACCEPTED={command_id} host={host}", flush=True)
+                        threading.Thread(target=_publish_existing_artifact, args=(host,), daemon=True).start()
         except Exception as exc:
             print(f"OMNILIVE_COMMAND_POLL_ERROR={type(exc).__name__}:{exc}", flush=True)
         time.sleep(5)
@@ -297,6 +336,35 @@ def status():
 def artifact():
     if not _auth():
         return jsonify(error="unauthorized"), 401
+    with _lock:
+        ready = _state["status"] == "ready"
+    if not ready or not ARTIFACT_PATH.exists():
+        return jsonify(error="artifact not ready"), 404
+    return send_file(ARTIFACT_PATH, mimetype="application/vnd.android.package-archive", as_attachment=True, download_name="omnilive-debug.apk")
+
+@app.get("/share/<token>")
+def share_artifact_page(token):
+    if not ARTIFACT_SHARE_TOKEN or not secrets.compare_digest(token, ARTIFACT_SHARE_TOKEN):
+        return jsonify(error="not found"), 404
+    with _lock:
+        ready = _state["status"] == "ready"
+        digest = _state.get("sha256")
+    if not ready or not ARTIFACT_PATH.exists():
+        return jsonify(error="artifact not ready"), 404
+    html = (
+        "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>OmniLive APK</title></head><body>"
+        "<h1>OmniLive debug APK</h1>"
+        f"<p>SHA-256: <code>{digest}</code></p>"
+        f"<p><a href=\"/share/{token}/apk\">Download omnilive-debug.apk</a></p>"
+        "</body></html>"
+    )
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+@app.get("/share/<token>/apk")
+def share_artifact_file(token):
+    if not ARTIFACT_SHARE_TOKEN or not secrets.compare_digest(token, ARTIFACT_SHARE_TOKEN):
+        return jsonify(error="not found"), 404
     with _lock:
         ready = _state["status"] == "ready"
     if not ready or not ARTIFACT_PATH.exists():
