@@ -1,5 +1,5 @@
 {
-  "command_id": "omnilive-c12214a-ubuntu-build-1",
-  "action": "build",
+  "command_id": "omnilive-c12214a-publish-artifact-1",
+  "action": "publish_artifact",
   "host": "159.203.87.214"
 }
