@@ -232,6 +232,159 @@ def _build(host):
         if source:
             shutil.rmtree(source, ignore_errors=True)
 
+
+def _deploy_masanawa_relay(host):
+    client = None
+    try:
+        relay_token = os.environ.get("MASANAWA_RELAY_TOKEN", "").strip()
+        if not relay_token:
+            raise RuntimeError("MASANAWA_RELAY_TOKEN is not configured")
+        with _lock:
+            _state.update(status="deploying_relay", message="deploying Masanawa Flutterwave relay", started_at=time.time(), finished_at=None, host=host, log="")
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=host,
+            username="root",
+            pkey=SSH_KEY,
+            timeout=30,
+            banner_timeout=30,
+            auth_timeout=30,
+        )
+
+        relay_py = r'''#!/usr/bin/env python3
+import http.server
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+
+TOKEN = os.environ["MASANAWA_RELAY_TOKEN"]
+ALLOWED = [
+    re.compile(r"^/v3/top-bill-categories$"),
+    re.compile(r"^/v3/bills/[^/]+/billers$"),
+    re.compile(r"^/v3/billers/[^/]+/items$"),
+    re.compile(r"^/v3/bill-items/[^/]+/validate$"),
+    re.compile(r"^/v3/billers/[^/]+/items/[^/]+/payment$"),
+    re.compile(r"^/v3/bills/[^/]+$"),
+]
+MAX_BODY = 1024 * 1024
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "MasanawaRelay/1.0"
+    def log_message(self, fmt, *args):
+        print(json.dumps({"event":"request","message":fmt % args}), flush=True)
+    def _json(self, status, body):
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("content-type","application/json")
+        self.send_header("content-length",str(len(data)))
+        self.send_header("cache-control","no-store")
+        self.end_headers()
+        self.wfile.write(data)
+    def _handle(self):
+        parsed = urlsplit(self.path)
+        if parsed.path == "/healthz" and self.command == "GET":
+            return self._json(200, {"ok":True,"service":"masanawa-flutterwave-relay"})
+        if self.headers.get("x-masanawa-relay-token","") != TOKEN:
+            return self._json(401, {"ok":False,"code":"unauthorized"})
+        if self.command not in {"GET","POST"} or not any(p.fullmatch(parsed.path) for p in ALLOWED):
+            return self._json(404, {"ok":False,"code":"not_allowed"})
+        auth = self.headers.get("authorization","")
+        if not auth.startswith("Bearer "):
+            return self._json(401, {"ok":False,"code":"missing_provider_authorization"})
+        body = None
+        if self.command == "POST":
+            length = int(self.headers.get("content-length","0") or "0")
+            if length < 0 or length > MAX_BODY:
+                return self._json(413, {"ok":False,"code":"body_too_large"})
+            body = self.rfile.read(length) if length else b""
+        upstream = "https://api.flutterwave.com" + parsed.path + (("?" + parsed.query) if parsed.query else "")
+        req = urllib.request.Request(upstream, data=body, method=self.command, headers={
+            "authorization":auth,
+            "accept":"application/json",
+            **({"content-type":"application/json"} if self.command == "POST" else {}),
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = resp.read()
+                status = resp.status
+                ctype = resp.headers.get("content-type","application/json")
+        except urllib.error.HTTPError as exc:
+            payload = exc.read()
+            status = exc.code
+            ctype = exc.headers.get("content-type","application/json")
+        except Exception:
+            return self._json(502, {"ok":False,"code":"flutterwave_unreachable"})
+        self.send_response(status)
+        self.send_header("content-type",ctype)
+        self.send_header("content-length",str(len(payload)))
+        self.send_header("cache-control","no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+    do_GET = _handle
+    do_POST = _handle
+
+http.server.ThreadingHTTPServer(("127.0.0.1",8090), Handler).serve_forever()
+'''
+        sftp = client.open_sftp()
+        try:
+            with sftp.file("/usr/local/bin/masanawa-flutterwave-relay.py", "w") as remote:
+                remote.write(relay_py)
+            sftp.chmod("/usr/local/bin/masanawa-flutterwave-relay.py", 0o755)
+        finally:
+            sftp.close()
+
+        escaped = relay_token.replace("\\", "\\\\").replace('"', '\\"')
+        service = f'''[Unit]
+Description=Masanawa Flutterwave egress relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="MASANAWA_RELAY_TOKEN={escaped}"
+ExecStart=/usr/bin/python3 /usr/local/bin/masanawa-flutterwave-relay.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+'''
+        domain = host.replace(".", "-") + ".sslip.io"
+        caddyfile = f'''{domain} {{
+    encode gzip
+    reverse_proxy 127.0.0.1:8090
+}}
+'''
+        sftp = client.open_sftp()
+        try:
+            with sftp.file("/etc/systemd/system/masanawa-flutterwave-relay.service", "w") as remote:
+                remote.write(service)
+            with sftp.file("/tmp/Caddyfile.masanawa", "w") as remote:
+                remote.write(caddyfile)
+        finally:
+            sftp.close()
+
+        _run(client, "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y caddy ca-certificates python3", timeout=900)
+        _run(client, "install -m 0644 /tmp/Caddyfile.masanawa /etc/caddy/Caddyfile && systemctl daemon-reload && systemctl enable --now masanawa-flutterwave-relay && systemctl enable --now caddy", timeout=180)
+        _run(client, "systemctl is-active masanawa-flutterwave-relay && systemctl is-active caddy && curl -fsS http://127.0.0.1:8090/healthz", timeout=120)
+        with _lock:
+            _state.update(status="relay_ready", message=f"Masanawa relay ready at https://{domain}", finished_at=time.time(), host=host)
+        print(f"MASANAWA_RELAY_READY=https://{domain}", flush=True)
+    except Exception as exc:
+        _append_log(f"\nERROR: {exc}\n")
+        with _lock:
+            _state.update(status="failed", message=str(exc), finished_at=time.time())
+    finally:
+        if client:
+            client.close()
+
+
 def _publish_existing_artifact(host):
     client = None
     try:
@@ -279,11 +432,11 @@ def _poll_commands():
             if command_id and command_id != _last_command_id:
                 _last_command_id = command_id
                 action = command.get("action")
-                if action in {"build", "publish_artifact"}:
+                if action in {"build", "publish_artifact", "deploy_masanawa_relay"}:
                     host = command.get("host", "")
                     ipaddress.ip_address(host)
                     with _lock:
-                        busy = _state["status"] in {"restoring", "uploading", "building", "publishing"}
+                        busy = _state["status"] in {"restoring", "uploading", "building", "publishing", "deploying_relay"}
                         if action == "build" and not busy:
                             _state.update(status="queued", message="build queued from command mailbox", started_at=time.time(), finished_at=None, host=host, sha256=None, log="")
                     if busy:
@@ -291,6 +444,9 @@ def _poll_commands():
                     elif action == "build":
                         print(f"OMNILIVE_COMMAND_ACCEPTED={command_id} host={host}", flush=True)
                         threading.Thread(target=_build, args=(host,), daemon=True).start()
+                    elif action == "deploy_masanawa_relay":
+                        print(f"MASANAWA_RELAY_COMMAND_ACCEPTED={command_id} host={host}", flush=True)
+                        threading.Thread(target=_deploy_masanawa_relay, args=(host,), daemon=True).start()
                     else:
                         print(f"OMNILIVE_ARTIFACT_COMMAND_ACCEPTED={command_id} host={host}", flush=True)
                         threading.Thread(target=_publish_existing_artifact, args=(host,), daemon=True).start()
