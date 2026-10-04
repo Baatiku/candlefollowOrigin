@@ -547,5 +547,20 @@ def share_artifact_file(token):
     return send_file(ARTIFACT_PATH, mimetype="application/vnd.android.package-archive", as_attachment=True, download_name="omnilive-debug.apk")
 
 
+
+def _auto_deploy_masanawa_relay():
+    host = os.environ.get("MASANAWA_RELAY_DEPLOY_HOST", "").strip()
+    if not host:
+        return
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        print("MASANAWA_RELAY_AUTO_DEPLOY_INVALID_HOST", flush=True)
+        return
+    time.sleep(2)
+    print(f"MASANAWA_RELAY_AUTO_DEPLOY host={host}", flush=True)
+    _deploy_masanawa_relay(host)
+
 # Start the GitHub command mailbox poller when Gunicorn imports this module.
 threading.Thread(target=_poll_commands, daemon=True).start()
+threading.Thread(target=_auto_deploy_masanawa_relay, daemon=True).start()
