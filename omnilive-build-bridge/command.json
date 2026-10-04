@@ -1,5 +1,5 @@
 {
-  "command_id": "masanawa-relay-deploy-20261004-3",
-  "action": "deploy_masanawa_relay",
+  "command_id": "masanawa-relay-repair-complete-20261004",
+  "action": "idle",
   "host": "209.38.107.173"
 }
