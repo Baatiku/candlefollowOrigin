@@ -371,7 +371,7 @@ WantedBy=multi-user.target
             sftp.close()
 
         _run(client, "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y caddy ca-certificates python3", timeout=900)
-        _run(client, "install -m 0644 /tmp/Caddyfile.masanawa /etc/caddy/Caddyfile && systemctl daemon-reload && systemctl enable --now masanawa-flutterwave-relay && systemctl enable --now caddy", timeout=180)
+        _run(client, "install -m 0644 /tmp/Caddyfile.masanawa /etc/caddy/Caddyfile && systemctl daemon-reload && systemctl enable --now masanawa-flutterwave-relay && systemctl restart masanawa-flutterwave-relay && caddy validate --config /etc/caddy/Caddyfile && systemctl enable caddy && systemctl restart caddy", timeout=180)
         _run(client, "systemctl is-active masanawa-flutterwave-relay && systemctl is-active caddy && curl -fsS http://127.0.0.1:8090/healthz", timeout=120)
         with _lock:
             _state.update(status="relay_ready", message=f"Masanawa relay ready at https://{domain}", finished_at=time.time(), host=host)
