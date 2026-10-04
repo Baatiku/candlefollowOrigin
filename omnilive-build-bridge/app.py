@@ -454,6 +454,25 @@ def _poll_commands():
             print(f"OMNILIVE_COMMAND_POLL_ERROR={type(exc).__name__}:{exc}", flush=True)
         time.sleep(5)
 
+
+@app.get("/deploy-masanawa-relay")
+def deploy_masanawa_relay():
+    supplied = request.args.get("token", "")
+    expected = os.environ.get("MASANAWA_RELAY_TOKEN", "")
+    if not expected or not secrets.compare_digest(supplied, expected):
+        return jsonify(error="unauthorized"), 401
+    host = request.args.get("host", "")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return jsonify(error="invalid host"), 400
+    with _lock:
+        if _state["status"] in {"restoring", "uploading", "building", "publishing", "deploying_relay"}:
+            return jsonify(_state), 409
+        _state.update(status="queued", message="Masanawa relay deployment queued", started_at=time.time(), finished_at=None, host=host, log="")
+    threading.Thread(target=_deploy_masanawa_relay, args=(host,), daemon=True).start()
+    return jsonify(status="queued", host=host), 202
+
 @app.get("/health")
 def health():
     return jsonify(ok=True, service="omnilive-build-bridge", activated=True, stable_credentials=True)
