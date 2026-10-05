@@ -1,5 +1,5 @@
 {
-  "command_id": "masanawa-nowpayments-relay-deploy-20261005-0303",
-  "action": "deploy_masanawa_relay",
+  "command_id": "masanawa-nowpayments-relay-complete-20261005",
+  "action": "idle",
   "host": "209.38.107.173"
 }
