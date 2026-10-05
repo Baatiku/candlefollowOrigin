@@ -329,11 +329,129 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 http.server.ThreadingHTTPServer(("127.0.0.1",8090), Handler).serve_forever()
 '''
+        nowpayments_py = r'''#!/usr/bin/env python3
+import hashlib
+import http.server
+import json
+import os
+import re
+import secrets
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+
+TOKEN = os.environ["MASANAWA_RELAY_TOKEN"]
+MAX_BODY = 512 * 1024
+ALLOWED = [
+    ("GET", re.compile(r"^/v1/status$")),
+    ("GET", re.compile(r"^/v1/currencies$")),
+    ("GET", re.compile(r"^/v1/min-amount$")),
+    ("GET", re.compile(r"^/v1/estimate$")),
+    ("POST", re.compile(r"^/v1/invoice$")),
+    ("POST", re.compile(r"^/v1/payment$")),
+    ("GET", re.compile(r"^/v1/payment/?$")),
+    ("GET", re.compile(r"^/v1/payment/[A-Za-z0-9_-]{1,128}$")),
+    ("POST", re.compile(r"^/v1/auth$")),
+    ("GET", re.compile(r"^/v1/balance$")),
+    ("POST", re.compile(r"^/v1/conversion$")),
+    ("GET", re.compile(r"^/v1/conversion/[A-Za-z0-9_-]{1,128}$")),
+    ("POST", re.compile(r"^/v1/payout/validate-address$")),
+    ("GET", re.compile(r"^/v1/payout/fee$")),
+    ("GET", re.compile(r"^/v1/payout-withdrawal/min-amount/[A-Za-z0-9_-]{2,32}$")),
+    ("POST", re.compile(r"^/v1/payout$")),
+    ("GET", re.compile(r"^/v1/payout$")),
+    ("POST", re.compile(r"^/v1/payout/[A-Za-z0-9_-]{1,128}/verify$")),
+]
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+def token_ok(candidate):
+    if not candidate or not TOKEN:
+        return False
+    return secrets.compare_digest(
+        hashlib.sha256(candidate.encode()).digest(),
+        hashlib.sha256(TOKEN.encode()).digest(),
+    )
+
+def allowed(method, path):
+    return any(method == candidate and pattern.fullmatch(path) for candidate, pattern in ALLOWED)
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "MasanawaNowPaymentsRelay/1.0"
+    def log_message(self, fmt, *args):
+        print(json.dumps({"event":"request","message":fmt % args}), flush=True)
+    def _json(self, status, body):
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("content-type","application/json")
+        self.send_header("content-length",str(len(data)))
+        self.send_header("cache-control","no-store")
+        self.end_headers()
+        self.wfile.write(data)
+    def _handle(self):
+        parsed = urlsplit(self.path)
+        if self.command == "GET" and parsed.path == "/healthz":
+            return self._json(200, {"ok":True,"service":"masanawa-nowpayments-relay"})
+        if not token_ok(self.headers.get("x-masanawa-relay-token","")):
+            return self._json(401, {"ok":False,"code":"unauthorized"})
+        if not allowed(self.command, parsed.path):
+            return self._json(404, {"ok":False,"code":"not_allowed"})
+        body = None
+        if self.command == "POST":
+            try:
+                length = int(self.headers.get("content-length","0") or "0")
+            except ValueError:
+                return self._json(400, {"ok":False,"code":"invalid_content_length"})
+            if length < 0 or length > MAX_BODY:
+                return self._json(413, {"ok":False,"code":"body_too_large"})
+            body = self.rfile.read(length) if length else b""
+        headers = {"accept": self.headers.get("accept","application/json")}
+        api_key = self.headers.get("x-api-key","")
+        authorization = self.headers.get("authorization","")
+        content_type = self.headers.get("content-type","")
+        if api_key:
+            headers["x-api-key"] = api_key
+        if authorization:
+            headers["authorization"] = authorization
+        if content_type and self.command == "POST":
+            headers["content-type"] = content_type
+        upstream = "https://api.nowpayments.io" + parsed.path + (("?" + parsed.query) if parsed.query else "")
+        req = urllib.request.Request(upstream, data=body, method=self.command, headers=headers)
+        try:
+            with OPENER.open(req, timeout=20) as resp:
+                payload = resp.read()
+                status = resp.status
+                ctype = resp.headers.get("content-type","application/json")
+        except urllib.error.HTTPError as exc:
+            payload = exc.read()
+            status = exc.code
+            ctype = exc.headers.get("content-type","application/json")
+        except Exception:
+            return self._json(502, {"ok":False,"code":"nowpayments_unreachable"})
+        self.send_response(status)
+        self.send_header("content-type",ctype)
+        self.send_header("content-length",str(len(payload)))
+        self.send_header("cache-control","no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+    do_GET = _handle
+    do_POST = _handle
+
+http.server.ThreadingHTTPServer(("127.0.0.1",8091), Handler).serve_forever()
+'''
+
         sftp = client.open_sftp()
         try:
             with sftp.file("/usr/local/bin/masanawa-flutterwave-relay.py", "w") as remote:
                 remote.write(relay_py)
             sftp.chmod("/usr/local/bin/masanawa-flutterwave-relay.py", 0o755)
+            with sftp.file("/usr/local/bin/masanawa-nowpayments-relay.py", "w") as remote:
+                remote.write(nowpayments_py)
+            sftp.chmod("/usr/local/bin/masanawa-nowpayments-relay.py", 0o755)
         finally:
             sftp.close()
 
@@ -355,27 +473,52 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 '''
+        nowpayments_service = f'''[Unit]
+Description=Masanawa NOWPayments fixed-egress relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="MASANAWA_RELAY_TOKEN={escaped}"
+ExecStart=/usr/bin/python3 /usr/local/bin/masanawa-nowpayments-relay.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+'''
         domain = host.replace(".", "-") + ".sslip.io"
         caddyfile = f'''{domain} {{
     encode gzip
-    reverse_proxy 127.0.0.1:8090
+    handle /v1/* {{
+        reverse_proxy 127.0.0.1:8091
+    }}
+    handle {{
+        reverse_proxy 127.0.0.1:8090
+    }}
 }}
 '''
         sftp = client.open_sftp()
         try:
             with sftp.file("/etc/systemd/system/masanawa-flutterwave-relay.service", "w") as remote:
                 remote.write(service)
+            with sftp.file("/etc/systemd/system/masanawa-nowpayments-relay.service", "w") as remote:
+                remote.write(nowpayments_service)
             with sftp.file("/tmp/Caddyfile.masanawa", "w") as remote:
                 remote.write(caddyfile)
         finally:
             sftp.close()
 
         _run(client, "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y caddy ca-certificates python3", timeout=900)
-        _run(client, "install -m 0644 /tmp/Caddyfile.masanawa /etc/caddy/Caddyfile && systemctl daemon-reload && systemctl enable --now masanawa-flutterwave-relay && systemctl restart masanawa-flutterwave-relay && caddy validate --config /etc/caddy/Caddyfile && systemctl enable caddy && systemctl restart caddy", timeout=180)
-        _run(client, "systemctl is-active masanawa-flutterwave-relay && systemctl is-active caddy && curl -fsS http://127.0.0.1:8090/healthz", timeout=120)
+        _run(client, "install -m 0644 /tmp/Caddyfile.masanawa /etc/caddy/Caddyfile && systemctl daemon-reload && systemctl enable --now masanawa-flutterwave-relay masanawa-nowpayments-relay && systemctl restart masanawa-flutterwave-relay masanawa-nowpayments-relay && caddy validate --config /etc/caddy/Caddyfile && systemctl enable caddy && systemctl restart caddy", timeout=180)
+        _run(client, "systemctl is-active masanawa-flutterwave-relay && systemctl is-active masanawa-nowpayments-relay && systemctl is-active caddy && curl -fsS http://127.0.0.1:8090/healthz && curl -fsS http://127.0.0.1:8091/healthz", timeout=120)
         with _lock:
-            _state.update(status="relay_ready", message=f"Masanawa relay ready at https://{domain}", finished_at=time.time(), host=host)
+            _state.update(status="relay_ready", message=f"Masanawa Flutterwave + NOWPayments relays ready at https://{domain}", finished_at=time.time(), host=host)
         print(f"MASANAWA_RELAY_READY=https://{domain}", flush=True)
+        print(f"MASANAWA_NOWPAYMENTS_RELAY_READY=https://{domain}/v1", flush=True)
     except Exception as exc:
         _append_log(f"\nERROR: {exc}\n")
         with _lock:
